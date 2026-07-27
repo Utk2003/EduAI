@@ -1,0 +1,105 @@
+type WorksheetRequestBody = {
+  concept?: string;
+  subject?: string;
+  difficulty?: string;
+  template?: string;
+  mcqCount?: number;
+  subjectiveCount?: number;
+};
+
+type CognitiveLevel = "recall" | "application" | "analysis";
+
+type WorksheetResult = {
+  mcqQuestions: { question: string; options: string[]; correctIndex: number; cognitiveLevel: CognitiveLevel }[];
+  subjectiveQuestions: { question: string; modelAnswer: string; cognitiveLevel: CognitiveLevel }[];
+};
+
+// Worksheet generation is analysis/content-generation, so it goes through OpenAI —
+// consistent with grading analysis. Mistral is reserved for OCR elsewhere in this app.
+export async function POST(request: Request) {
+  try {
+    const body = (await request.json()) as WorksheetRequestBody;
+    const {
+      concept = "the target concept",
+      subject = "General",
+      difficulty = "Mixed",
+      template = "Guided recovery",
+      mcqCount = 4,
+      subjectiveCount = 2,
+    } = body;
+
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      return Response.json(
+        { error: "OPENAI_API_KEY is not set. Add it to .env.local and restart the dev server." },
+        { status: 500 }
+      );
+    }
+
+    const systemPrompt =
+      "You are a teacher's assistant that writes targeted practice worksheets for a specific learning gap. " +
+      "Respond with ONLY a single JSON object, no markdown fences, no commentary, matching exactly this shape: " +
+      '{"mcqQuestions": [{"question": string, "options": [string, string, string, string], "correctIndex": number, "cognitiveLevel": "recall"|"application"|"analysis"}], ' +
+      '"subjectiveQuestions": [{"question": string, "modelAnswer": string, "cognitiveLevel": "recall"|"application"|"analysis"}]}. ' +
+      "correctIndex is 0-based. Questions must be specific, subject-appropriate, and directly target the given concept and difficulty. " +
+      "cognitiveLevel must reflect what the question actually demands: \"recall\" for remembering a fact/definition/procedure, " +
+      "\"application\" for using the concept to solve a standard problem, \"analysis\" for multi-step reasoning, comparison, or justifying an answer. " +
+      "Aim for a realistic mix across the set rather than defaulting every question to the same level.";
+
+    const userPrompt =
+      `Subject: ${subject}\n` +
+      `Target learning gap / concept: ${concept}\n` +
+      `Worksheet style: ${template}\n` +
+      `Difficulty: ${difficulty}\n` +
+      `Number of multiple-choice questions: ${mcqCount}\n` +
+      `Number of subjective questions: ${subjectiveCount}\n\n` +
+      "Generate the worksheet content following the required JSON shape exactly, with the requested question counts.";
+
+    const startedAt = Date.now();
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-5.6-sol",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        response_format: { type: "json_object" },
+      }),
+    });
+    const openaiMs = Date.now() - startedAt;
+
+    if (!res.ok) {
+      const errText = await res.text();
+      return Response.json({ error: errText, timing: [{ provider: "openai", ms: openaiMs, ok: false }] }, { status: res.status });
+    }
+
+    const data = await res.json();
+    const raw = data?.choices?.[0]?.message?.content;
+    if (!raw || typeof raw !== "string") {
+      return Response.json({ error: "Empty response from OpenAI" }, { status: 502 });
+    }
+
+    let parsed: WorksheetResult;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return Response.json({ error: "OpenAI did not return valid JSON", raw }, { status: 502 });
+    }
+
+    const levels: CognitiveLevel[] = ["recall", "application", "analysis"];
+    const normalizeLevel = (v: unknown): CognitiveLevel =>
+      levels.includes(v as CognitiveLevel) ? (v as CognitiveLevel) : "application";
+    parsed.mcqQuestions = (parsed.mcqQuestions || []).map(q => ({ ...q, cognitiveLevel: normalizeLevel(q.cognitiveLevel) }));
+    parsed.subjectiveQuestions = (parsed.subjectiveQuestions || []).map(q => ({ ...q, cognitiveLevel: normalizeLevel(q.cognitiveLevel) }));
+
+    return Response.json({ ...parsed, timing: [{ provider: "openai", ms: openaiMs, ok: true }] });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unexpected error";
+    return Response.json({ error: message }, { status: 500 });
+  }
+}

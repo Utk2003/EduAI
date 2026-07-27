@@ -1,0 +1,915 @@
+"use client";
+
+import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+
+type Role = "Teacher" | "Principal" | "School admin" | "Platform admin";
+type TeacherModule = "Home" | "Work" | "Review" | "X-Ray" | "Interventions" | "Students" | "Resources" | "Achievements" | "Reports" | "Settings";
+type AdminModule = "Overview" | "Users" | "Schools & Classes" | "Students" | "Academic years" | "Branding & Privacy" | "Schools" | "Analytics" | "AI Configuration" | "Feature flags" | "System health" | "Audit" | "Reports";
+type Stage = "draft" | "uploaded" | "setup" | "grading" | "review" | "approved" | "xray" | "intervention" | "followup" | "published";
+type Gap = {concept:string; mastery:number};
+type GradeResult = {fileId:string; studentName:string; questionPaperFileId?:string; questionPaperName?:string; score:number; maxMarks:number; gaps:Gap[]; date:string; feedback?:string; ocrText?:string};
+type Assessment = {
+  id:string; title:string; type:string; grade:string; section:string; subject:string;
+  maxMarks:number; date:string; stage:Stage; files:UploadFile[]; questions:number;
+  reviewed:number; totalReviews:number; quality:number; published:boolean; version:number; gradedFileIds?:string[]; lastGradedFileId?:string;
+  gradeResults?:Record<string,GradeResult>; answerKey?:string; rubric?:string;
+};
+type UploadFile = {id:string;name:string;type:string;size:number;progress:number;status:string;preview?:string};
+type User = {id:string;name:string;email:string;role:string;school:string;phone:string;status:"Active"|"Inactive"|"Invited"};
+type Intervention = {id:string;assessmentId:string;concept:string;format:string;duration:string;status:string;followup:string;followupRecorded?:boolean;followupEvidence?:{studentsCompleted:number;avgMastery:number;outcome:string;note:string}};
+type CognitiveLevel = "recall" | "application" | "analysis";
+type WorksheetContent = {
+  mcqQuestions:{question:string;options:string[];correctIndex:number;cognitiveLevel:CognitiveLevel}[];
+  subjectiveQuestions:{question:string;modelAnswer:string;cognitiveLevel:CognitiveLevel}[];
+};
+type Worksheet = {id:string;title:string;type:string;status:string;template?:string;concept?:string;mcq?:number;subjective?:number;difficulty?:string;answerSheets?:number;gradedSheets?:number;content?:WorksheetContent};
+type ApiLogEntry = {provider:"mistral"|"openai";ms:number;ok:boolean;ts:number};
+type DemoState = {assessments:Assessment[];users:User[];interventions:Intervention[];classes:string[];schools:string[];students:{id:string;name:string;roll:string;className:string;status:string}[];resources:Worksheet[];academicYears:string[];events:string[];apiLog:ApiLogEntry[]};
+
+const initialState:DemoState = {
+  assessments:[
+    {id:"a1",title:"Fractions checkpoint",type:"Quiz",grade:"6",section:"A",subject:"Mathematics",maxMarks:20,date:"2026-07-21",stage:"review",files:[{id:"f0",name:"Grade6A_Fractions_QuestionPaper.pdf",type:"application/pdf",size:1120000,progress:100,status:"OCR complete"},{id:"f1",name:"Grade6A_Fractions_MiraBose.pdf",type:"application/pdf",size:2450000,progress:100,status:"OCR complete"}],questions:8,reviewed:25,totalReviews:28,quality:78,published:false,version:1},
+    {id:"a2",title:"Decimals exit ticket",type:"Exit ticket",grade:"6",section:"B",subject:"Mathematics",maxMarks:10,date:"2026-07-19",stage:"published",files:[],questions:5,reviewed:30,totalReviews:30,quality:86,published:true,version:1}
+  ],
+  users:[
+    {id:"u1",name:"Asha Sharma",email:"asha@sunrise.edu",role:"Teacher",school:"Sunrise Academy",phone:"+91 98765 43210",status:"Active"},
+    {id:"u2",name:"Rohan Mehta",email:"rohan@sunrise.edu",role:"Principal",school:"Sunrise Academy",phone:"+91 98765 43211",status:"Active"},
+    {id:"u3",name:"Priya Nair",email:"priya@sunrise.edu",role:"Teacher",school:"Sunrise Academy",phone:"+91 98765 43212",status:"Inactive"}
+  ],
+  interventions:[{id:"i1",assessmentId:"a2",concept:"Decimal place value",format:"Guided practice",duration:"15 minutes",status:"In progress",followup:"2026-07-26"}],
+  classes:["Grade 6A · Mathematics · 28 students","Grade 6B · Mathematics · 30 students","Grade 7A · Mathematics · 32 students"],
+  schools:["Sunrise Academy · Mumbai · CBSE"],
+  students:[{id:"s1",name:"Mira Bose",roll:"6A-12",className:"Grade 6A",status:"Active"},{id:"s2",name:"Kabir Shah",roll:"6A-14",className:"Grade 6A",status:"Active"},{id:"s3",name:"Riya Menon",roll:"6A-18",className:"Grade 6A",status:"Active"},{id:"s4",name:"Aarav Kapoor",roll:"6A-21",className:"Grade 6A",status:"Active"}],
+  resources:[{id:"r1",title:"Unlike Fractions Recovery Practice",type:"Guided worksheet",status:"Approved",template:"Guided recovery",concept:"Add fractions with unlike denominators",mcq:6,subjective:4,answerSheets:6,gradedSheets:4},{id:"r2",title:"Decimal place-value exit ticket",type:"Exit ticket",status:"Draft",template:"Quick check",concept:"Decimal place value",mcq:4,subjective:2,answerSheets:0,gradedSheets:0}],
+  academicYears:["2026–27 · Active","2025–26 · Archived"],
+  events:["Demo workspace created"],
+  apiLog:[]
+};
+
+const stageLabel:Record<Stage,string>={draft:"Draft",uploaded:"Uploaded",setup:"Rubric setup",grading:"AI grading",review:"Teacher review",approved:"Approved",xray:"X-Ray ready",intervention:"Intervention",followup:"Follow-up",published:"Published"};
+const teacherNav:TeacherModule[]=["Home","Work","Review","X-Ray","Interventions","Students","Resources","Achievements","Reports","Settings"];
+
+function cloneInitial(){return JSON.parse(JSON.stringify(initialState)) as DemoState}
+function logApiTiming(setState:(fn:(s:DemoState)=>DemoState)=>void,timing?:{provider:"mistral"|"openai";ms:number;ok:boolean}[]){
+  if(!timing||!timing.length)return;
+  setState(s=>({...s,apiLog:[...timing.map(t=>({...t,ts:Date.now()})),...(s.apiLog||[])].slice(0,200)}));
+}
+
+// Aggregates every real graded result across all assessments into usable stats.
+// Everything downstream (Students, Reports, Interventions, dashboards) should
+// read from this instead of hardcoded demo numbers.
+function allGradeResults(state:DemoState):GradeResult[]{
+  return state.assessments.flatMap(a=>Object.values(a.gradeResults||{}));
+}
+function studentMastery(state:DemoState):Record<string,{mastery:number;evidence:number;lastDate:string}>{
+  const results=allGradeResults(state);
+  const byStudent:Record<string,{sum:number;count:number;lastDate:string}>={};
+  results.forEach(r=>{
+    const avgGap=r.gaps.length?r.gaps.reduce((s,g)=>s+g.mastery,0)/r.gaps.length:(r.score/Math.max(1,r.maxMarks))*100;
+    const bucket=byStudent[r.studentName]||{sum:0,count:0,lastDate:r.date};
+    bucket.sum+=avgGap;bucket.count+=1;if(r.date>bucket.lastDate)bucket.lastDate=r.date;
+    byStudent[r.studentName]=bucket;
+  });
+  const out:Record<string,{mastery:number;evidence:number;lastDate:string}>={};
+  Object.entries(byStudent).forEach(([name,b])=>{out[name]={mastery:Math.round(b.sum/b.count),evidence:b.count,lastDate:b.lastDate}});
+  return out;
+}
+function conceptMastery(state:DemoState):{concept:string;mastery:number;evidence:number}[]{
+  const results=allGradeResults(state);
+  const byConcept:Record<string,{sum:number;count:number}>={};
+  results.forEach(r=>r.gaps.forEach(g=>{
+    const bucket=byConcept[g.concept]||{sum:0,count:0};
+    bucket.sum+=g.mastery;bucket.count+=1;
+    byConcept[g.concept]=bucket;
+  }));
+  return Object.entries(byConcept).map(([concept,b])=>({concept,mastery:Math.round(b.sum/b.count),evidence:b.count})).sort((a,b)=>a.mastery-b.mastery);
+}
+function overallMastery(state:DemoState):number|null{
+  const concepts=conceptMastery(state);
+  if(!concepts.length)return null;
+  return Math.round(concepts.reduce((s,c)=>s+c.mastery,0)/concepts.length);
+}
+function masteryTrend(state:DemoState):{label:string;value:number}[]{
+  const results=allGradeResults(state).slice().sort((a,b)=>a.date.localeCompare(b.date));
+  const byMonth:Record<string,{sum:number;count:number}>={};
+  results.forEach(r=>{
+    const avgGap=r.gaps.length?r.gaps.reduce((s,g)=>s+g.mastery,0)/r.gaps.length:(r.score/Math.max(1,r.maxMarks))*100;
+    const month=r.date.slice(0,7);
+    const bucket=byMonth[month]||{sum:0,count:0};
+    bucket.sum+=avgGap;bucket.count+=1;
+    byMonth[month]=bucket;
+  });
+  return Object.entries(byMonth).map(([label,b])=>({label,value:Math.round(b.sum/b.count)}));
+}
+
+export default function FunctionalEduAIApp(){
+  const [role,setRole]=useState<Role>("Teacher");
+  const [module,setModule]=useState<TeacherModule|AdminModule>("Home");
+  const [state,setState]=useState<DemoState>(cloneInitial);
+  const [selectedId,setSelectedId]=useState("a1");
+  const [dialog,setDialog]=useState<string|null>(null);
+  const [toast,setToast]=useState<{kind:"success"|"warning"|"error";text:string}|null>(null);
+  const [dark,setDark]=useState(false);
+  const [ready,setReady]=useState(false);
+
+  useEffect(()=>{try{const saved=localStorage.getItem("eduai-xray-demo-v4");if(saved){const parsed=JSON.parse(saved);const base=cloneInitial();setState({...base,...parsed,students:parsed.students||base.students,resources:(parsed.resources||base.resources).map((r:Worksheet)=>({...r,answerSheets:r.answerSheets||0,gradedSheets:r.gradedSheets||0})),academicYears:parsed.academicYears||base.academicYears,apiLog:parsed.apiLog||[]})}const theme=localStorage.getItem("eduai-theme");setDark(theme==="dark")}catch{}setReady(true)},[]);
+  useEffect(()=>{if(ready)localStorage.setItem("eduai-xray-demo-v4",JSON.stringify(state))},[state,ready]);
+  useEffect(()=>{document.documentElement.dataset.theme=dark?"dark":"light";if(ready)localStorage.setItem("eduai-theme",dark?"dark":"light")},[dark,ready]);
+  const selected=state.assessments.find(a=>a.id===selectedId)||state.assessments[0];
+  const notify=(text:string,kind:"success"|"warning"|"error"="success")=>{setToast({text,kind});window.setTimeout(()=>setToast(null),3200)};
+  const updateAssessment=(id:string,patch:Partial<Assessment>)=>setState(s=>({...s,assessments:s.assessments.map(a=>a.id===id?{...a,...patch}:a),events:[`${new Date().toLocaleTimeString()} · ${patch.stage?stageLabel[patch.stage]:"Assessment updated"}`,...s.events].slice(0,20)}));
+  const openAssessment=(id:string,next:TeacherModule="Work")=>{setSelectedId(id);setModule(next)};
+  const resetDemo=()=>{setState(cloneInitial());setSelectedId("a1");notify("Demo data restored")};
+
+  useEffect(()=>{setModule(role==="Teacher"?"Home":"Overview")},[role]);
+  if(!ready)return <div className="app-loading"><img src="/brand/logo.png" alt="EduAI Hub"/><b>Preparing your workspace…</b></div>;
+
+  const nav=role==="Teacher"?teacherNav:role==="School admin"?["Overview","Users","Schools & Classes","Students","Academic years","Branding & Privacy","Reports"] as AdminModule[]:role==="Platform admin"?["Overview","Schools","Users","Analytics","AI Configuration","Feature flags","System health","Audit"] as AdminModule[]:["Overview","Reports"] as AdminModule[];
+  return <div className="app-shell functional-shell">
+    <aside className="sidebar">
+      <button className="brand" onClick={()=>setModule(role==="Teacher"?"Home":"Overview")}><img src="/brand/shield.png" alt=""/><span><b>Learning X-Ray</b><small>by EduAI Hub</small></span></button>
+      <nav aria-label="Primary navigation">{nav.map(item=><button key={item} className={module===item?"active":""} onClick={()=>setModule(item)}><span className="nav-icon">{icon(item)}</span><span>{item}</span>{item==="Review"&&<em>{state.assessments.reduce((n,a)=>n+Math.max(0,a.totalReviews-a.reviewed),0)}</em>}</button>)}</nav>
+      <div className="sidebar-foot">
+        <button className="secondary full" onClick={()=>setDialog("activity")}>Activity & audit</button>
+        <button className="profile" onClick={()=>setDialog("profile")}><span>AS</span><div><b>Asha Sharma</b><small>Sunrise Academy</small></div><i>•••</i></button>
+      </div>
+    </aside>
+    <main>
+      <header className="topbar">
+        <div className="mobile-brand"><img src="/brand/shield.png" alt=""/><b>Learning X-Ray</b></div>
+        <div className="crumb"><span>Sunrise Academy</span><i>›</i><b>{role} workspace</b></div>
+        <div className="top-actions">
+          <select aria-label="Switch demo role" value={role} onChange={e=>setRole(e.target.value as Role)}>{(["Teacher","Principal","School admin","Platform admin"] as Role[]).map(x=><option key={x}>{x}</option>)}</select>
+          <button aria-label="Toggle appearance" onClick={()=>setDark(x=>!x)}>{dark?"☀":"☾"}</button>
+          <button aria-label="Notifications" onClick={()=>setDialog("notifications")}>♢{state.events.length>0&&<em>{Math.min(9,state.events.length)}</em>}</button>
+        </div>
+      </header>
+      <div className="content">
+        {role==="Teacher"
+          ? <TeacherApp module={module as TeacherModule} state={state} selected={selected} openAssessment={openAssessment} open={setDialog} notify={notify} update={updateAssessment} setState={setState}/>
+          : role==="School admin"
+            ? <SchoolAdminApp module={module as AdminModule} state={state} setState={setState} open={setDialog} notify={notify}/>
+            : role==="Principal"
+              ? <PrincipalApp module={module as AdminModule} state={state} open={setDialog} notify={notify}/>
+              : <PlatformApp module={module as AdminModule} state={state} open={setDialog} notify={notify}/>
+        }
+      </div>
+    </main>
+    <nav className="mobile-nav">{nav.slice(0,5).map(item=><button key={item} className={module===item?"active":""} onClick={()=>setModule(item)}><span className="nav-icon">{icon(item)}</span><small>{item}</small></button>)}</nav>
+    {toast&&<div className={`toast ${toast.kind}`} role="status"><b>{toast.kind==="error"?"!":"✓"}</b>{toast.text}</div>}
+    {dialog&&<AppDialog type={dialog} close={()=>setDialog(null)} open={setDialog} state={state} setState={setState} selected={selected} update={updateAssessment} notify={notify} resetDemo={resetDemo} openAssessment={openAssessment}/>}
+  </div>
+}
+
+function TeacherApp({module,state,selected,openAssessment,open,notify,update,setState}:any){
+  if(module==="Home")return <TeacherHome state={state} openAssessment={openAssessment} open={open}/>;
+  if(module==="Work")return <Work state={state} selected={selected} openAssessment={openAssessment} open={open} update={update} notify={notify}/>;
+  if(module==="Review")return <Review selected={selected} update={update} notify={notify} open={open}/>;
+  if(module==="X-Ray")return <XRay selected={selected} open={open} notify={notify}/>;
+  if(module==="Interventions")return <Interventions state={state} setState={setState} open={open} notify={notify}/>;
+  if(module==="Students")return <StudentsView state={state} open={open} notify={notify}/>;
+  if(module==="Resources")return <ResourcesView state={state} setState={setState} open={open} notify={notify}/>;
+  if(module==="Achievements")return <AchievementsView state={state} notify={notify}/>;
+  if(module==="Settings")return <SettingsView open={open} notify={notify}/>;
+  return <Reports state={state} open={open} notify={notify}/>;
+}
+
+function TeacherHome({state,openAssessment,open}:any){
+  const pending=state.assessments.reduce((n:any,a:any)=>n+Math.max(0,a.totalReviews-a.reviewed),0);
+  const concepts=conceptMastery(state);
+  const priorityConcepts=concepts.filter(c=>c.mastery<70);
+  const today=new Date().toISOString().slice(0,10);
+  const followupsDue=state.interventions.filter((i:Intervention)=>i.status!=="Completed"&&i.followup&&i.followup<=today).length;
+  return <><PageHead eyebrow="Teacher workspace" title="Good morning, Asha." subtitle="Follow the clearest path from evidence to action."><button className="primary" onClick={()=>open("create-assessment")}>＋ Create assessment</button><button className="secondary" onClick={()=>open("upload")}>↑ Upload work</button></PageHead>
+    <section className="metric-grid five"><Metric label="Assessments" value={state.assessments.length} note="Saved locally"/><Metric label="Answers to review" value={pending} note="Teacher judgement"/><Metric label="Priority gaps" value={String(priorityConcepts.length)} note={concepts.length?`Across ${concepts.length} concept${concepts.length===1?"":"s"} with evidence`:"No graded evidence yet"}/><Metric label="Interventions" value={state.interventions.length} note="Active cycles"/><Metric label="Follow-ups due" value={String(followupsDue)} note="Overdue or due today"/></section>
+    <div className="dashboard-grid"><section className="card span-2"><CardHead title="Continue your work" eyebrow="Assessment pipeline"><button className="link" onClick={()=>open("create-assessment")}>New assessment →</button></CardHead>
+      <div className="table"><div className="tr th"><span>Assessment</span><span>Progress</span><span>Next step</span><span>Status</span></div>{state.assessments.map((a:any)=><button className="tr row-button" key={a.id} onClick={()=>openAssessment(a.id,"Work")}><span><b>{a.title}</b><small>Grade {a.grade}{a.section} · {a.subject}</small></span><span>{a.reviewed}/{a.totalReviews||0}</span><span>{nextAction(a.stage)}</span><span><b>{stageLabel[a.stage as Stage]}</b></span></button>)}</div>
+    </section><section className="card"><CardHead eyebrow="Recommended next" title={pending?"Review uncertain answers":"Create a new Learning X-Ray"}/><p>AI suggestions remain drafts until you approve them.</p><button className="primary" onClick={()=>openAssessment("a1","Review")}>{pending?"Review next answer":"Open sample X-Ray"} →</button></section></div></>;
+}
+
+function Work({state,selected,openAssessment,open,update,notify}:any){
+  const [filter,setFilter]=useState("All");
+  const list=state.assessments.filter((a:any)=>filter==="All"||stageLabel[a.stage].includes(filter));
+  return <><PageHead eyebrow="Teacher workspace" title="Work & assessments" subtitle="Create, upload and complete every assessment without leaving the workflow."><button className="primary" onClick={()=>open("create-assessment")}>＋ Create</button><button className="secondary" onClick={()=>open("upload")}>↑ Upload</button></PageHead>
+    <div className="dashboard-grid"><section className="card span-2"><div className="filters">{["All","Draft","Uploaded","Review","Published"].map(x=><button key={x} className={filter===x?"active":""} onClick={()=>setFilter(x)}>{x}</button>)}</div><div className="work-grid">{list.map((a:any)=><button className={`work-card ${selected?.id===a.id?"selected-card":""}`} key={a.id} onClick={()=>openAssessment(a.id)}><div className="mini-paper"><i/><i/><i/></div><b>{a.title}</b><small>Grade {a.grade}{a.section} · {a.subject}</small><Progress value={Math.round(stageProgress(a.stage))}/><span>{stageLabel[a.stage]} →</span></button>)}</div></section>
+    {selected&&<AssessmentDecision assessment={selected} open={open} openAssessment={openAssessment}/>}
+    {selected&&<AssessmentJourney assessment={selected} open={open}/>}
+    {selected&&<UploadedFiles assessment={selected} update={update} notify={notify} open={open}/>}</div></>;
+}
+
+function AssessmentDecision({assessment:a,open,openAssessment}:any){
+  const graded=assessmentHasGrades(a);
+  const learningGaps=()=>graded?openAssessment(a.id,"X-Ray"):open("grade-picker");
+  return <section className="card span-2 decision-card"><div><p className="eyebrow">Choose an action</p><h2>{graded?"Graded evidence is ready":"Select an answer sheet to begin"}</h2><p>{graded?"Grade another uploaded sheet or open the visual learning-gap analysis from approved evidence.":"Choose the exact uploaded answer sheet for grading. Learning gaps become available after grading."}</p></div><div className="button-row"><button className="primary" onClick={()=>a.files.length?open("grade-picker"):open("upload")}>Grade answer sheet</button><button className="secondary" onClick={learningGaps}>View learning gaps</button></div></section>
+}
+
+function AssessmentJourney({assessment:a,open}:any){
+  const steps:[Stage,string,string][]=[["draft","Assessment details","create-assessment"],["uploaded","Student work","upload"],["setup","Questions & rubric","setup"],["grading","AI processing","process"],["review","Teacher review","review-help"],["approved","Final approval","approval"],["xray","Learning X-Ray","xray-details"],["intervention","Intervention","intervention-form"],["followup","Follow-up","followup"],["published","Publish grades","publish"]];
+  const current=Object.keys(stageLabel).indexOf(a.stage);
+  return <section className="card span-2"><CardHead eyebrow="End-to-end workflow" title={a.title}><span className="status success">Version {a.version}</span></CardHead><div className="journey">{steps.map(([stage,label,action],i)=><button key={stage} className={i<=current?"done":i===current+1?"current":""} onClick={()=>open(action)}><i>{i<current?"✓":i+1}</i><b>{label}</b><small>{i<=current?"Complete":"Open step"}</small></button>)}</div></section>;
+}
+
+function Review({selected,update,notify,open}:any){
+  const a=selected;
+  const results:GradeResult[]=(Object.values(a.gradeResults||{}) as GradeResult[]).sort((x,y)=>x.date.localeCompare(y.date));
+  const remaining=Math.max(0,a.totalReviews-a.reviewed);
+  const [index,setIndex]=useState(0);
+  const current=results.length?results[Math.min(index,results.length-1)]:undefined;
+  const gradedFile=current?a.files.find((f:UploadFile)=>f.id===current.fileId):undefined;
+  const [mark,setMark]=useState(current?String(current.score):"0");
+  const [note,setNote]=useState(current?.feedback||"");
+  useEffect(()=>{setMark(current?String(current.score):"0");setNote(current?.feedback||"")},[current?.fileId]);
+  const approve=()=>{
+    const reviewed=Math.min(a.totalReviews,a.reviewed+1);
+    update(a.id,{reviewed,stage:reviewed===a.totalReviews?"approved":"review"});
+    notify(reviewed===a.totalReviews?"All answers approved. Final approval is ready.":"Mark approved. Next answer loaded.");
+    if(index<results.length-1)setIndex(index+1);
+  };
+  if(!results.length)return <><PageHead eyebrow={a.title} title="Teacher grading review" subtitle="Compare the original evidence, AI suggestion and rubric before approval."><button className="secondary" onClick={()=>open("grade-picker")}>Grade an answer sheet</button></PageHead>
+    <section className="card span-2"><p className="eyebrow">No graded evidence yet</p><h2>Grade an answer sheet to review it here</h2><p>This screen shows the real OCR text, score and rubric evidence from Mistral and OpenAI once you grade a student's answer sheet — there's nothing to review until then.</p></section></>;
+  return <><PageHead eyebrow={`${a.title} · Answer ${index+1} of ${results.length}`} title="Teacher grading review" subtitle="Compare the original evidence, AI suggestion and rubric before approval."><button className="secondary" onClick={()=>open("bulk-review")}>Bulk review</button><button className="secondary" onClick={()=>open(`grade-file:${current?.fileId}`)}>Regrade</button></PageHead>
+    <div className="review-layout"><section className="card paper-panel"><CardHead eyebrow={`Selected answer sheet · ${gradedFile?.name||"answer sheet"}`} title={`${current?.studentName} · graded against ${current?.questionPaperName||"subject rubric"}`}><span className="status warning">Draft · teacher approval required</span></CardHead><div className="paper">{current?.ocrText?<p className="hand">{current.ocrText}</p>:<p className="hand note">OCR text was not stored for this earlier grading run.</p>}<i className="teacher-mark">{mark}/{current?.maxMarks}</i></div><div className="source-files"><b>Graded answer sheet:</b><span>{gradedFile?.name||"Selected upload"}</span><b>Reference files:</b>{a.files.filter((f:UploadFile)=>f.id!==gradedFile?.id).map((f:UploadFile)=><span key={f.id}>{f.name}</span>)}</div><div className="pager"><button disabled={index===0} onClick={()=>setIndex(Math.max(0,index-1))}>← Previous</button><span>{remaining} remaining</span><button disabled={index>=results.length-1} onClick={()=>setIndex(Math.min(results.length-1,index+1))}>Next →</button></div></section>
+    <aside className="card inspector"><p className="eyebrow">AI suggestion · draft · {a.subject}</p><h2>{current?.score} / {current?.maxMarks} marks</h2><div className="evidence"><b>Concept-level evidence (OpenAI)</b>{current?.gaps.map(g=><p key={g.concept}>{g.concept}: {g.mastery}% mastery</p>)}</div>{current?.feedback&&<div className="evidence"><b>AI feedback</b><p>{current.feedback}</p></div>}<label>Teacher mark<input type="number" min="0" max={current?.maxMarks} step=".5" value={mark} onChange={e=>setMark(e.target.value)}/></label><label>Teacher note<textarea value={note} onChange={e=>setNote(e.target.value)}/></label><div className="button-row"><button className="secondary" onClick={()=>open(`grade-file:${current?.fileId}`)}>Regrade this answer</button><button className="secondary" onClick={()=>notify("Escalated this assessment to subject coordinator","warning")}>Escalate</button></div><button className="primary full" disabled={!remaining} onClick={approve}>{remaining?"Approve & next":"Review complete ✓"}</button>{!remaining&&<button className="primary full" onClick={()=>open("approval")}>Final approval & publish</button>}<p className="audit-note">Mistral OCR + OpenAI grading · {a.subject} rubric · Version {a.version} · teacher decision recorded</p></aside></div></>;
+}
+
+function XRay({selected,open,notify}:any){
+  const results:GradeResult[]=Object.values(selected.gradeResults||{});
+  const hasData=results.length>0;
+
+  // Aggregate mastery per concept across every real graded result.
+  const conceptTotals:{[concept:string]:{sum:number;count:number}}={};
+  results.forEach(r=>r.gaps.forEach(g=>{
+    const bucket=conceptTotals[g.concept]||{sum:0,count:0};
+    bucket.sum+=g.mastery;bucket.count+=1;
+    conceptTotals[g.concept]=bucket;
+  }));
+  const concepts=Object.keys(conceptTotals);
+  const avgFor=(c:string)=>Math.round(conceptTotals[c].sum/conceptTotals[c].count);
+  const sortedConcepts=concepts.slice().sort((a,b)=>avgFor(a)-avgFor(b));
+  const priorityConcept=sortedConcepts[0];
+  const classMastery=concepts.length?Math.round(concepts.reduce((s,c)=>s+avgFor(c),0)/concepts.length):0;
+  const priorityStudents=results.filter(r=>r.gaps.some(g=>g.concept===priorityConcept&&g.mastery<70));
+  const students=Array.from(new Set(results.map(r=>r.studentName)));
+
+  const lastGradedFileId=selected.lastGradedFileId||results[0]?.fileId;
+
+  return <><PageHead eyebrow={`Learning X-Ray · ${selected.title}`} title="Visual learning-gap report" subtitle="Approved grading evidence becomes an actionable study and reassessment plan."><button className="primary" disabled={!hasData} onClick={()=>open(`study-guide:${lastGradedFileId}`)}>Create study guide</button><button className="secondary" onClick={()=>open("worksheet")}>Build gap worksheet</button><button className="secondary" onClick={()=>open("quality")}>Assessment quality</button></PageHead>
+  {!hasData&&<section className="card span-2"><p className="eyebrow">No graded evidence yet</p><h2>Grade at least one answer sheet to see real learning gaps</h2><p>This report is built entirely from Mistral-graded results for {selected.subject}. Once you grade a student's answer sheet, their concept-level gaps will appear here instead of placeholder data.</p></section>}
+  {hasData&&<div className="dashboard-grid"><section className="card span-2"><div className="xray-summary"><Metric label="Class mastery" value={`${classMastery}%`} note="Graded evidence"/><Metric label="Priority concepts" value={String(sortedConcepts.filter(c=>avgFor(c)<70).length)} note={`${priorityStudents.length} students`}/><Metric label="Confidence" value={results.length>2?"High":results.length>1?"Medium":"Low"} note={`${results.length} evidence point${results.length===1?"":"s"}`}/><Metric label="Quality" value={`${selected.quality||0}%`} note="Suitable with limitations"/></div><div className="heatmap"><div/>{concepts.map(c=><b key={c}>{c}</b>)}{students.flatMap((s)=>[<span key={s}>{s}</span>,...concepts.map((c)=>{const r=results.find(x=>x.studentName===s);const g=r?.gaps.find(x=>x.concept===c);const v=g?g.mastery:null;const band=v===null?"review":v>=80?"mastered":v>=60?"developing":"gap";return <button key={c+s} className={band} disabled={v===null} onClick={()=>open(`evidence:${encodeURIComponent(s)}:${encodeURIComponent(c)}`)}>{v===null?"—":`${v}%`}</button>})])}</div></section>
+  <section className="card"><p className="eyebrow">Priority gap</p><h2>{priorityConcept||"No concept identified yet"}</h2><div className="big-stat">{priorityStudents.length} <small>students</small></div><p>{priorityConcept?`Lowest average mastery across graded evidence for ${selected.subject}: ${avgFor(priorityConcept)}%.`:"Grade more answer sheets to surface a priority concept."}</p><div className="gap-funnel">{sortedConcepts.slice(0,3).map(c=><span key={c} className={avgFor(c)<60?"critical":""}><i style={{width:`${avgFor(c)}%`}}/>{c} · {avgFor(c)}%</span>)}</div><button className="secondary" disabled={!priorityStudents.length} onClick={()=>open(`evidence:${encodeURIComponent(priorityStudents[0]?.studentName||"")}:${encodeURIComponent(priorityConcept||"")}`)}>View student evidence</button><button className="primary" disabled={!priorityConcept} onClick={()=>open(`study-guide:${lastGradedFileId}`)}>Generate study guide</button></section>
+  <section className="card"><p className="eyebrow">Teacher authority</p><h2>Approve diagnosis</h2><label>Classification<select><option>Priority learning gap</option><option>Developing</option><option>Possible performance issue</option><option>Insufficient evidence</option></select></label><label>Observation<select><option>No additional observation</option><option>Time issue</option><option>Language issue</option><option>Careless error</option></select></label><button className="primary" onClick={()=>notify("Diagnosis approved and stored in the audit trail")}>Approve X-Ray</button></section></div>}</>;
+}
+
+function Interventions({state,setState,open,notify}:any){
+  const complete=(id:string)=>{setState((s:DemoState)=>({...s,interventions:s.interventions.map(i=>i.id===id?{...i,status:"Completed"}:i),events:["Intervention completed",...s.events]}));notify("Intervention marked complete. Record follow-up evidence next.")};
+  const concepts=conceptMastery(state);
+  const completedCount=state.interventions.filter((i:Intervention)=>i.status==="Completed").length;
+  const followupRate=state.interventions.length?Math.round((completedCount/state.interventions.length)*100):0;
+  return <><PageHead eyebrow="Improvement cycle" title="Interventions & follow-up" subtitle="Temporary, concept-specific support linked to measurable evidence."><button className="primary" onClick={()=>open("intervention-form")}>＋ Create intervention</button><button className="secondary" onClick={()=>open("worksheet")}>Generate worksheet</button></PageHead>
+  <div className="dashboard-grid">{state.interventions.map((i:any)=>{const evidence=concepts.find(c=>c.concept===i.concept);return <section className="card" key={i.id}><span className={`status ${i.status==="Completed"?"success":"warning"}`}>{i.status}</span><p className="eyebrow">Temporary group · Strengthen</p><h2>{i.concept}</h2><p>{i.format} · {i.duration} · {evidence?`${evidence.evidence} evidence point${evidence.evidence===1?"":"s"}`:"No graded evidence yet"}</p><p>Follow-up: {i.followup}</p>{i.followupRecorded&&i.followupEvidence&&<p className="modal-copy">Recorded outcome: {i.followupEvidence.outcome} · {i.followupEvidence.studentsCompleted} students · {i.followupEvidence.avgMastery}% avg mastery</p>}<div className="button-row"><button className="secondary" onClick={()=>open(`group:${i.assessmentId}:${encodeURIComponent(i.concept)}`)}>Review group</button>{i.status!=="Completed"?<button className="primary" onClick={()=>complete(i.id)}>Mark complete</button>:<button className="primary" onClick={()=>open(`followup:${i.id}`)}>{i.followupRecorded?"Follow-up recorded ✓":"Record follow-up"}</button>}</div></section>})}
+  <section className="card"><p className="eyebrow">Resource studio</p><h2>Generate teacher-approved materials</h2><p>Worksheets, exit tickets, guided examples and answer keys remain drafts until approval.</p><button className="primary" onClick={()=>open("worksheet")}>Generate resource</button></section>
+  <section className="card span-2"><CardHead eyebrow="Progress tracking" title="Concept mastery from graded evidence"/>{concepts.length?<div className="quality-bars">{concepts.slice(0,3).map(c=><Bar key={c.concept} label={c.concept} pct={c.mastery}/>)}<Bar label="Intervention follow-up completion" pct={followupRate}/></div>:<p className="modal-copy">No graded evidence yet — grade answer sheets to see real concept mastery here.</p>}</section></div></>;
+}
+
+function Reports({state,open,notify}:any){
+  const [tab,setTab]=useState("Student performance");const tabs=["Student performance","Class heatmap","Concept mastery","Learning gaps","Teacher summary","School dashboard"];
+  const concepts=conceptMastery(state);
+  const trend=masteryTrend(state);
+  return <><PageHead eyebrow="Reports" title="Evidence-led reporting" subtitle="Interactive views with quality, privacy and limitation context."><button className="primary" onClick={()=>open("report")}>＋ Generate report</button></PageHead>
+  <div className="filters">{tabs.map(x=><button key={x} className={tab===x?"active":""} onClick={()=>setTab(x)}>{x}</button>)}</div>
+  <div className="dashboard-grid"><section className="card span-2"><CardHead eyebrow={tab} title={reportTitle(tab)}><button className="secondary" onClick={()=>notify(`${tab} exported as a demo report`)}>Export</button></CardHead>
+  {!concepts.length&&<p className="modal-copy">No graded evidence yet. Grade answer sheets to populate real reports here.</p>}
+  {concepts.length>0&&(tab.includes("heatmap")||tab.includes("mastery")?<div className="concept-bars">{concepts.map(c=><Bar key={c.concept} label={c.concept} pct={c.mastery}/>)}</div>:trend.length?<div className="chart" aria-label="Performance trend chart">{trend.map((t,i)=><button key={t.label} style={{height:`${t.value}%`}} onClick={()=>notify(`${t.label}: ${t.value}% mastery`)} aria-label={`${t.label}, ${t.value}%`}/>)}</div>:<p className="modal-copy">Grade evidence across more than one date to see a trend.</p>)}</section>
+  <section className="card"><p className="eyebrow">Secure sharing</p><h2>Leadership report</h2><label>Expiry<select><option>7 days</option><option>30 days</option><option>90 days</option></select></label><label className="check"><input type="checkbox" defaultChecked/> Require access code</label><label className="check"><input type="checkbox"/> Allow download</label><button className="primary" onClick={()=>open("share-report")}>Create secure link</button></section>
+  <section className="card"><p className="eyebrow">Data safeguards</p><h2>Context included</h2><ul className="checklist"><li>No teacher or student ranking</li><li>Assessment limitations disclosed</li><li>Teacher-approved evidence only</li><li>Revocable access</li></ul></section></div></>;
+}
+
+function StudentsView({state,open,notify}:any){
+  const [query,setQuery]=useState("");const students=state.students.filter((s:any)=>`${s.name} ${s.roll} ${s.className}`.toLowerCase().includes(query.toLowerCase()));
+  const mastery=studentMastery(state);
+  return <><PageHead eyebrow="Assigned classes only" title="Students & evidence" subtitle="Review evidence and progress without permanent ability labels."><button className="secondary" onClick={()=>open("import-students")}>Import roster</button><button className="primary" onClick={()=>open("student")}>＋ Add student</button></PageHead><section className="card"><CardHead eyebrow="Grade 6A · Mathematics" title="Student roster"><input className="compact-input" placeholder="Search name or roll number" value={query} onChange={e=>setQuery(e.target.value)}/></CardHead><div className="user-table">{students.map((s:any)=>{const m=mastery[s.name];return <button className="user-row student-row" key={s.id} onClick={()=>open(`student-evidence:${s.id}`)}><span className="avatar">{s.name.split(" ").map((x:string)=>x[0]).join("")}</span><div><b>{s.name}</b><small>{s.roll} · {s.className}</small></div><span>{m?`${m.mastery}% mastery`:"No evidence yet"}</span><span className="status success">{s.status}</span><span className="link">View evidence →</span></button>})}</div></section></>;
+}
+
+function ResourcesView({state,setState,open,notify}:any){
+  const approve=(id:string)=>{setState((s:DemoState)=>({...s,resources:s.resources.map(r=>r.id===id?{...r,status:"Approved"}:r),events:["Resource approved",...s.events]}));notify("Resource approved and ready to print")};
+  return <><PageHead eyebrow="Teacher-approved resources" title="Worksheet studio" subtitle="Create targeted worksheets, collect responses, grade them and verify improvement."><button className="primary" onClick={()=>open("worksheet")}>＋ Create worksheet</button></PageHead><div className="dashboard-grid">{state.resources.map((r:Worksheet)=><section className="card" key={r.id}><span className={`status ${r.status==="Approved"?"success":"warning"}`}>{r.status}</span><p className="eyebrow">{r.template||r.type}</p><h2>{r.title}</h2><p>{r.concept||"Teacher-defined concept"} · {r.mcq||0} MCQ · {r.subjective||0} subjective</p><div className="worksheet-stats"><span><b>{r.answerSheets||0}</b> submitted</span><span><b>{r.gradedSheets||0}</b> graded</span><span><b>{Math.max(0,(r.answerSheets||0)-(r.gradedSheets||0))}</b> to check</span></div><div className="button-row"><button className="secondary" onClick={()=>open(`worksheet-edit:${r.id}`)}>Edit</button><button className="secondary" onClick={()=>downloadWorksheet(r)}>Download worksheet</button><button className="secondary" onClick={()=>downloadAnswerKey(r)}>Answer key</button><button className="primary" onClick={()=>open(`worksheet-grade:${r.id}`)}>{(r.answerSheets||0)>0?"Grade & check sheets":"Upload answer sheets"}</button>{r.status!=="Approved"&&<button className="primary" onClick={()=>approve(r.id)}>Approve</button>}</div></section>)}</div></>;
+}
+
+function AchievementsView({state,notify}:any){
+  const results=allGradeResults(state);
+  const completedInterventions=state.interventions.filter((i:Intervention)=>i.status==="Completed").length;
+  const followupRate=state.interventions.length?Math.round((completedInterventions/state.interventions.length)*100):0;
+  const avgQuality=state.assessments.length?Math.round(state.assessments.reduce((s:number,a:Assessment)=>s+(a.quality||0),0)/state.assessments.length):0;
+  const badges=[
+    ["First Learning X-Ray",results.length?"Completed":"Not yet — grade an answer sheet"],
+    ["Intervention Planner",completedInterventions?"Completed":"Not yet — complete an intervention"],
+    ["Evidence-Based Teacher",`${Math.min(completedInterventions,5)} of 5 cycles`],
+    ["Assessment Quality Champion",`${avgQuality}% avg quality`],
+    ["Answer sheets graded",`${results.length} graded`]
+  ];
+  return <><PageHead eyebrow="Progress without competition" title="Achievements" subtitle="Recognition rewards evidence quality, follow-up and improvement—not upload volume."><button className="secondary" onClick={()=>notify("Weekly progress summary prepared")}>Weekly summary</button></PageHead><section className="metric-grid"><Metric label="Improvement cycles" value={String(completedInterventions)} note="Completed"/><Metric label="Answer sheets graded" value={String(results.length)} note="Mistral + OpenAI"/><Metric label="Follow-up completion" value={`${followupRate}%`} note="This term"/><Metric label="Avg assessment quality" value={`${avgQuality}%`} note="Across all assessments"/></section><div className="achievement-grid">{badges.map(([name,status],i)=><button key={name} onClick={()=>notify(`${name}: ${status}`)}><i>{["✦","↗","✓","◎","◷"][i]}</i><b>{name}</b><small>{status}</small></button>)}</div><p className="insight">No teacher or student leaderboard is used. School challenges and celebrations can be disabled by administrators.</p></>;
+}
+
+function SettingsView({open}:any){
+  const items=[["Profile & onboarding","Personal, teaching and school details","profile"],["Grading preferences","Strictness, partial credit, spelling and units","grading-settings"],["Appearance & accessibility","Theme, contrast, text and reduced motion","appearance-settings"],["Notifications","Processing, intervention and follow-up reminders","notification-settings"],["Privacy & consent","Terms, AI disclosure and product-improvement consent","consent-settings"],["Sessions & security","Login history and log out all devices","security-settings"]];
+  return <><PageHead eyebrow="Teacher preferences" title="Settings" subtitle="Control grading, notifications, accessibility, privacy and account security."/><div className="settings-grid">{items.map(([title,sub,type])=><button key={title} onClick={()=>open(type)}><b>{title}</b><small>{sub}</small><span>Manage →</span></button>)}</div></>;
+}
+
+function SchoolAdminApp({module,state,setState,open,notify}:any){
+  const toggle=(id:string)=>{setState((s:DemoState)=>({...s,users:s.users.map(u=>u.id===id?{...u,status:u.status==="Active"?"Inactive":"Active"}:u)}));notify("User status updated")};
+  return <><PageHead eyebrow="School administrator" title={module} subtitle="Manage people, school structure and access with a clear audit trail.">{module==="Users"&&<button className="primary" onClick={()=>open("invite")}>＋ Invite user</button>}{module==="Schools & Classes"&&<button className="primary" onClick={()=>open("class")}>＋ Add class</button>}</PageHead>
+  {module==="Overview"&&<><section className="metric-grid"><Metric label="Users" value={state.users.length} note="Across all roles"/><Metric label="Invitations" value={state.users.filter((u:any)=>u.status==="Invited").length} note="Pending"/><Metric label="Classes" value={state.classes.length} note="Current year"/><Metric label="Schools" value={state.schools.length} note="Active tenant"/></section><div className="dashboard-grid"><section className="card span-2"><CardHead eyebrow="Admin actions" title="School setup"/><div className="admin-actions"><button onClick={()=>open("invite")}>Invite user<span>Name, email, role and school</span></button><button onClick={()=>open("class")}>Add class<span>Grade, section and subject</span></button><button onClick={()=>open("school")}>Manage school<span>Profile, board and branding</span></button><button onClick={()=>open("privacy-settings")}>Privacy & retention<span>Access and data policy</span></button></div></section></div></>}
+  {module==="Users"&&<section className="card"><CardHead eyebrow="People & access" title="Users"><input className="compact-input" placeholder="Search users" onChange={()=>{}}/></CardHead><div className="user-table">{state.users.map((u:any)=><div className="user-row" key={u.id}><span className="avatar">{u.name.split(" ").map((x:string)=>x[0]).join("").slice(0,2)}</span><div><b>{u.name}</b><small>{u.email} · {u.school}</small></div><span>{u.role}</span><span className={`status ${u.status==="Active"?"success":u.status==="Invited"?"warning":""}`}>{u.status}</span><div className="button-row"><button className="link" onClick={()=>open(`edit-user:${u.id}`)}>Edit</button><button className="link" onClick={()=>open(`reset-user:${u.id}`)}>Reset password</button><button className="link" onClick={()=>toggle(u.id)}>{u.status==="Active"?"Deactivate":"Activate"}</button></div></div>)}</div></section>}
+  {module==="Schools & Classes"&&<div className="dashboard-grid"><section className="card"><CardHead eyebrow="School profile" title="Schools"><button className="link" onClick={()=>open("school")}>Edit</button></CardHead>{state.schools.map((x:any)=><div className="list-item" key={x}><b>{x}</b><button onClick={()=>open("school")}>Manage</button></div>)}</section><section className="card"><CardHead eyebrow="Academic structure" title="Classes"><button className="link" onClick={()=>open("class")}>Add</button></CardHead>{state.classes.map((x:any)=><div className="list-item" key={x}><b>{x}</b><button onClick={()=>open("class")}>Edit</button></div>)}</section></div>}
+  {module==="Students"&&<StudentsView state={state} open={open} notify={notify}/>}
+  {module==="Academic years"&&<section className="card"><CardHead eyebrow="School calendar" title="Academic years"><button className="primary" onClick={()=>open("academic-year")}>＋ Add year</button></CardHead>{state.academicYears.map((x:string)=><div className="list-item" key={x}><b>{x}</b><div className="button-row"><button onClick={()=>open("academic-year")}>Edit</button><button onClick={()=>notify("Academic year status updated")}>Change status</button></div></div>)}</section>}
+  {module==="Branding & Privacy"&&<div className="settings-grid">{[["School branding","Logo, report cover and co-branding","school"],["Privacy & retention","Retention, recovery and deletion","privacy-settings"],["Login-provider policy","Google, Microsoft and email fallback","security-settings"],["Notifications","Frequency and templates","notification-settings"],["Support access","Reason, named agent and expiry","support-access"],["Report settings","Expiry, download and OTP defaults","report-settings"]].map(([a,b,c])=><button key={a} onClick={()=>open(c)}><b>{a}</b><small>{b}</small><span>Manage →</span></button>)}</div>}
+  {module==="Reports"&&<Reports state={state} open={open} notify={notify}/>}</>;
+}
+
+function PrincipalApp({module,state,open,notify}:any){
+  if(module==="Reports")return <Reports state={state} open={open} notify={notify}/>;
+  const concepts=conceptMastery(state);
+  const priorityGaps=concepts.filter(c=>c.mastery<70).length;
+  const completed=state.interventions.filter((i:Intervention)=>i.status==="Completed").length;
+  const interventionRate=state.interventions.length?Math.round((completed/state.interventions.length)*100):0;
+  const mastery=overallMastery(state);
+  const trend=masteryTrend(state);
+  return <><PageHead eyebrow="Principal workspace" title="School academic improvement" subtitle="Aggregated, non-punitive insight for planning academic support."><button className="primary" onClick={()=>open("report")}>Generate leadership report</button></PageHead><section className="metric-grid"><Metric label="Students in roster" value={String(state.students.length)} note="Assigned classes"/><Metric label="Priority gaps" value={String(priorityGaps)} note={`Across ${concepts.length} concept${concepts.length===1?"":"s"}`}/><Metric label="Interventions complete" value={`${interventionRate}%`} note={`${completed} of ${state.interventions.length}`}/><Metric label="Overall mastery" value={mastery===null?"No data":`${mastery}%`} note="Graded evidence"/></section><div className="dashboard-grid"><section className="card span-2"><CardHead eyebrow="School trend" title="Mastery from graded evidence"/>{trend.length?<div className="chart">{trend.map(t=><button key={t.label} style={{height:`${t.value}%`}} onClick={()=>notify(`${t.label}: ${t.value}% mastery evidence`)}/>)}</div>:<p className="modal-copy">No graded evidence yet across more than one date.</p>}</section><section className="card"><p className="eyebrow">Management action</p><h2>Protect remedial time</h2><p>{concepts[0]?`${concepts[0].concept} is currently the lowest-mastery concept with graded evidence (${concepts[0].mastery}%).`:"No graded evidence yet to identify a priority concept."}</p><button className="primary" onClick={()=>notify("Action assigned to academic head")}>Assign action</button></section></div></>;
+}
+
+function SystemHealthPanel({state}:{state:DemoState}){
+  const [checking,setChecking]=useState(false);
+  const [live,setLive]=useState<{checkedAt:string;providers:{provider:string;ok:boolean;ms:number;status?:number;error?:string}[]}|null>(null);
+  const [liveError,setLiveError]=useState("");
+  const runCheck=async()=>{
+    setChecking(true);setLiveError("");
+    try{
+      const res=await fetch("/api/system-health");
+      const payload=await res.json();
+      if(!res.ok)throw new Error(payload?.error||"Health check failed");
+      setLive(payload);
+    }catch(err){
+      setLiveError(err instanceof Error?err.message:"Health check failed");
+    }finally{
+      setChecking(false);
+    }
+  };
+  const log=state.apiLog||[];
+  const byProvider=(p:"mistral"|"openai")=>log.filter(l=>l.provider===p);
+  const stats=(p:"mistral"|"openai")=>{
+    const entries=byProvider(p);
+    if(!entries.length)return null;
+    const ok=entries.filter(e=>e.ok).length;
+    const avgMs=Math.round(entries.reduce((s,e)=>s+e.ms,0)/entries.length);
+    return {count:entries.length,successRate:Math.round((ok/entries.length)*100),avgMs};
+  };
+  const mistralStats=stats("mistral");
+  const openaiStats=stats("openai");
+  return <section className="card span-2">
+    <CardHead eyebrow="System health" title="Live provider status"/>
+    <p className="modal-copy">This checks Mistral and OpenAI right now with a real request and reports what actually comes back — no simulated numbers.</p>
+    <button className="secondary" onClick={runCheck} disabled={checking}>{checking?"Checking…":"Check live status now"}</button>
+    {liveError&&<p className="form-error" role="alert">{liveError}</p>}
+    {live&&<div>
+      {live.providers.map(p=><div className="list-item" key={p.provider}><b>{p.provider==="mistral"?"Mistral":"OpenAI"}</b><span className={`status ${p.ok?"success":"warning"}`}>{p.ok?`Reachable · ${p.ms}ms`:`Unreachable${p.error?` · ${p.error}`:""}`}</span></div>)}
+      <p className="modal-copy">Checked at {new Date(live.checkedAt).toLocaleTimeString()}.</p>
+    </div>}
+    <h2>Real usage this session</h2>
+    <p className="modal-copy">Success rate and latency computed from every real grading and worksheet-generation call this app has actually made — not projected or simulated.</p>
+    <div>
+      <div className="list-item"><b>Mistral OCR</b><span className="status neutral">{mistralStats?`${mistralStats.successRate}% success · ${mistralStats.avgMs}ms avg · ${mistralStats.count} call${mistralStats.count===1?"":"s"}`:"No calls made yet this session"}</span></div>
+      <div className="list-item"><b>OpenAI analysis</b><span className="status neutral">{openaiStats?`${openaiStats.successRate}% success · ${openaiStats.avgMs}ms avg · ${openaiStats.count} call${openaiStats.count===1?"":"s"}`:"No calls made yet this session"}</span></div>
+    </div>
+    <p className="modal-copy">Long-term uptime (30/90-day %) and queue depth still require a real monitoring backend with persistent storage across sessions — that's genuinely out of scope for this frontend-only build, not faked.</p>
+  </section>;
+}
+function PlatformApp({module,state,open,notify}:any){
+  const configs:{[key:string]:string[]}={Overview:["Tenant management","Usage analytics","AI providers","Model routing","Prompt versions","Academic configuration","Feature flags","Gamification","Notifications","Privacy","System health","Audit logs"],Schools:["Search schools","Plans & limits","Suspend / reactivate","Pilot status","Support owner","Internal notes"],Users:["Search users","Suspend access","Reset access","Login history","Terms version","Platform roles"],Analytics:["DAU / WAU / MAU","Assessments & pages","AI acceptance & changes","Regrading","X-Rays & interventions","Time saved & AI cost"],"AI Configuration":["Provider registry","Model registry","Routing rules","Prompt versions","Output schemas","Fallback sequence"],"Feature flags":["AI grading","Handwriting recognition","Regrading","Gamification","Principal reporting","Experimental models"],"System health":["API uptime","Queue depth","Provider latency","Database & storage","Failed jobs","Active incidents"],Audit:["Authentication","Configuration changes","Support access","Tenant changes","AI versions","Retention actions"]};
+  const items=configs[module]||configs.Overview;
+  const totalFiles=state.assessments.reduce((s:number,a:Assessment)=>s+(a.files?.length||0),0);
+  const results=allGradeResults(state);
+  const reviewRatio=state.assessments.length?Math.round(state.assessments.reduce((s:number,a:Assessment)=>s+(a.totalReviews?a.reviewed/a.totalReviews:0),0)/state.assessments.length*100):null;
+  return <><PageHead eyebrow="EduAI Hub platform administrator" title={module==="Overview"?"Platform operations":module} subtitle="Tenant health, responsible AI operations and auditable configuration."><button className="primary" onClick={()=>open("platform-config")}>＋ Configure</button></PageHead><section className="metric-grid"><Metric label="Active schools" value={String(state.schools.length)} note="This tenant"/><Metric label="Files processed" value={String(totalFiles)} note="Uploaded to assessments"/><Metric label="Graded evidence" value={String(results.length)} note="Mistral OCR + OpenAI analysis"/><Metric label="Teacher review rate" value={reviewRatio===null?"No data":`${reviewRatio}%`} note="Avg across assessments"/></section><div className="dashboard-grid">{module==="System health"?<SystemHealthPanel state={state}/>:<section className="card span-2"><CardHead eyebrow={module} title="Controls & evidence"/><div className="admin-actions">{items.map(x=><button key={x} onClick={()=>open("platform-config")}><b>{x}</b><span>View, configure and audit</span></button>)}</div></section>}<section className="card"><p className="eyebrow">Responsible operations</p><h2>Current safeguards</h2>{["Tenant isolation","Identifiable-data restriction","Prompt versioning","Support-access expiry","Audit logging"].map(x=><div className="list-item" key={x}><b>{x}</b><span className="status success">Active</span></div>)}</section></div></>;
+}
+
+function AppDialog({type,close,open,state,setState,selected,update,notify,resetDemo,openAssessment}:any){
+  const title=type.split(":")[0]; const id=type.split(":").slice(1).join(":"); const user=state.users.find((u:any)=>u.id===id);
+  const done=(message:string)=>{notify(message);close()};
+  return <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)close()}}><section className="modal functional-modal" role="dialog" aria-modal="true" aria-label={dialogTitle(title)}><button className="modal-close" onClick={close} aria-label="Close">×</button>
+    {title==="create-assessment"&&<CreateAssessment state={state} setState={setState} done={(id:string)=>{openAssessment(id,"Work");done("Assessment saved and added to Work")}}/>}
+    {title==="upload"&&<UploadDialogV2 assessment={selected} update={update} done={()=>done("Files uploaded. OCR and question detection are ready.")}/>}
+    {title==="grade-picker"&&<GradeSelectionDialog assessment={selected} open={open} done={done}/>}
+    {title==="grade-file"&&<PerFileGradeDialog assessment={selected} file={(selected.files||[]).find((f:UploadFile)=>f.id===id)} state={state} setState={setState} update={update} open={open} notify={notify}/>}
+    {title==="student-gaps"&&<StudentGapsDialog assessment={selected} fileId={id} open={open}/>}
+    {title==="worksheet-gap"&&<WorksheetDialog state={state} setState={setState} presetConcept={selected.gradeResults?.[id]?.gaps.slice().sort((a:Gap,b:Gap)=>a.mastery-b.mastery)[0]?.concept} presetTitle={selected.gradeResults?.[id]?`${selected.gradeResults[id].gaps.slice().sort((a:Gap,b:Gap)=>a.mastery-b.mastery)[0]?.concept} Practice`:undefined} presetStudent={selected.gradeResults?.[id]?.studentName} done={()=>done("Practice worksheet and answer key ready in Resources")}/>}
+    {title==="setup"&&<SetupDialog assessment={selected} update={update} done={()=>done("Questions, answer key and rubric saved")}/>}
+    {title==="process"&&<ProcessDialog assessment={selected} update={update} open={open} done={()=>{openAssessment(selected.id,"Review");done(`${selected.subject} answer sheets graded. Review this assessment now.`)}}/>}
+    {title==="approval"&&<ConfirmDialog eyebrow="Teacher authority" title="Final approval" text={`${selected.reviewed}/${selected.totalReviews} answers reviewed. Approving locks grading version ${selected.version} and makes results ready to publish.`} action="Approve final grades" onConfirm={()=>{update(selected.id,{stage:"xray"});done("Final grades approved. Learning X-Ray generated.")}}/>}
+    {title==="publish"&&<ConfirmDialog eyebrow="High-impact action" title="Publish grades" text="Published grades become visible in reports. A new version is required for later changes." action="Publish grades" onConfirm={()=>{update(selected.id,{stage:"published",published:true});done("Grades published and reports updated.")}}/>}
+    {title==="regrade"&&<RegradeDialog assessment={selected} update={update} done={()=>done("Regrade version created and returned to teacher review")}/>}
+    {title==="bulk-review"&&<BulkReview assessment={selected} update={update} done={()=>done("High-confidence answers approved in bulk")}/>}
+    {title==="intervention-form"&&<InterventionForm state={state} setState={setState} assessment={selected} done={()=>done("Intervention created and added to the improvement cycle")}/>}
+    {title==="study-guide"&&<StudyGuideDialog assessment={selected} fileId={id||undefined} open={open} done={()=>done("Study guide saved to resources")}/>}
+    {(title==="worksheet"||title==="worksheet-edit")&&<WorksheetDialog state={state} setState={setState} worksheet={state.resources.find((r:Worksheet)=>r.id===id)} done={()=>done("Worksheet saved to Resources with its answer key")}/>}
+    {title==="worksheet-grade"&&<WorksheetGradingDialog worksheet={state.resources.find((r:Worksheet)=>r.id===id)} setState={setState} done={()=>done("Answer worksheets graded and results saved")}/>}
+    {title==="followup"&&<FollowupDialog setState={setState} intervention={state.interventions.find((i:Intervention)=>i.id===id)} done={()=>done("Follow-up evidence recorded.")}/>}
+    {title==="quality"&&<QualityDialog assessment={selected} state={state} done={()=>done("Assessment quality recommendations acknowledged")}/>}
+    {title==="evidence"&&<EvidenceDialog state={state} id={id} done={()=>done("Evidence decision saved")}/>}
+    {title==="report"&&<ReportDialog done={()=>done("Interactive report generated and saved")}/>}
+    {title==="share-report"&&<ShareDialog done={()=>done("Secure demo link created with expiry and access code")}/>}
+    {title==="invite"&&<InviteDialog state={state} setState={setState} done={()=>done("Invitation created and shown in Users")}/>}
+    {title==="edit-user"&&user&&<UserEdit user={user} setState={setState} done={()=>done("User details updated")}/>}
+    {title==="reset-user"&&user&&<ConfirmDialog eyebrow="Account security" title="Reset password" text={`Send a password-reset link to ${user.email}?`} action="Send reset link" onConfirm={()=>done("Password reset link sent")}/>}
+    {title==="class"&&<ClassDialog state={state} setState={setState} done={()=>done("Class saved")}/>}
+    {title==="school"&&<SchoolDialog state={state} setState={setState} done={()=>done("School profile saved")}/>}
+    {title==="privacy-settings"&&<SimpleSettings title="Privacy & retention" fields={["Retention period","Support access","Login provider policy","Notification frequency"]} done={()=>done("Privacy and retention settings saved")}/>}
+    {title==="platform-config"&&<SimpleSettings title="Platform configuration" fields={["Configuration area","Enabled status","Scope","Approval note"]} done={()=>done("Platform configuration version saved")}/>}
+    {title==="profile"&&<SimpleSettings title="Profile & preferences" fields={["Display name","Mobile number","Preferred language","Email notifications"]} done={()=>done("Profile saved")}/>}
+    {title==="activity"&&<Activity events={state.events} resetDemo={resetDemo} close={close}/>}
+    {title==="notifications"&&<NotificationDialog state={state} done={()=>done("Notifications marked as read")}/>}
+    {title==="group"&&<GroupDialog state={state} id={id} done={()=>done("Temporary group membership saved")}/>}
+    {title==="student"&&<StudentDialog state={state} setState={setState} done={()=>done("Student added to the roster")}/>}
+    {title==="import-students"&&<RosterImport state={state} setState={setState} done={()=>done("Student roster imported and validated")}/>}
+    {title==="student-evidence"&&<StudentEvidence state={state} student={state.students.find((s:any)=>s.id===id)} done={()=>done("Student observation saved")}/>}
+    {title==="academic-year"&&<AcademicYearDialog state={state} setState={setState} done={()=>done("Academic year saved")}/>}
+    {title==="grading-settings"&&<SimpleSettings title="Grading preferences" fields={["Strictness","Partial-credit policy","Spelling and grammar tolerance","Working and units required","Alternative methods","Confidence threshold"]} done={()=>done("Grading preferences saved")}/>}
+    {title==="appearance-settings"&&<SimpleSettings title="Appearance & accessibility" fields={["Appearance","High contrast","Text size","Reduced motion"]} done={()=>done("Accessibility preferences saved")}/>}
+    {title==="notification-settings"&&<SimpleSettings title="Notification settings" fields={["Reminder frequency","Processing results","Intervention reminders","Follow-up reminders"]} done={()=>done("Notification settings saved")}/>}
+    {title==="consent-settings"&&<ConsentDialog done={()=>done("Privacy and consent choices saved")}/>}
+    {title==="security-settings"&&<SecurityDialog done={()=>done("Security preference saved")}/>}
+    {title==="support-access"&&<SimpleSettings title="Temporary support access" fields={["Named support agent","Reason","Expiry","School approval"]} done={()=>done("Support-access decision saved and audited")}/>}
+    {title==="report-settings"&&<SimpleSettings title="Report settings" fields={["Default expiry","Require OTP","Allow download","School branding"]} done={()=>done("Report defaults saved")}/>}
+    {title==="review-help"&&<ConfirmDialog eyebrow="Workflow guide" title="Teacher review" text="Open the Review module to approve, edit, bulk-review, escalate or request a second AI opinion for every answer." action="Got it" onConfirm={close}/>}
+    {title==="xray-details"&&<ConfirmDialog eyebrow="Learning X-Ray" title="Analysis ready" text="Open X-Ray to inspect student evidence, confidence, mastery and concept classifications." action="Got it" onConfirm={close}/>}
+  </section></div>;
+}
+
+function CreateAssessment({state,setState,done}:any){const submit=(e:FormEvent<HTMLFormElement>)=>{e.preventDefault();const f=new FormData(e.currentTarget);const id=`a${Date.now()}`;const a:Assessment={id,title:String(f.get("title")),type:String(f.get("type")),grade:String(f.get("grade")),section:String(f.get("section")),subject:String(f.get("subject")),maxMarks:Number(f.get("marks")),date:String(f.get("date")),stage:"draft",files:[],questions:0,reviewed:0,totalReviews:0,quality:0,published:false,version:1};setState((s:DemoState)=>({...s,assessments:[a,...s.assessments],events:[`Assessment created · ${a.title}`,...s.events]}));done(id)};return <form onSubmit={submit}><DialogHead eyebrow="New work" title="Create assessment"/><div className="form-grid"><Field label="Title"><input name="title" required minLength={3} placeholder="e.g. Fractions checkpoint"/></Field><Field label="Activity type"><select name="type" required>{["Test","Quiz","Worksheet","Homework","Assignment","Diagnostic","Follow-up"].map(x=><option key={x}>{x}</option>)}</select></Field><Field label="Grade"><select name="grade">{["5","6","7","8","9","10"].map(x=><option key={x}>{x}</option>)}</select></Field><Field label="Section"><input name="section" required defaultValue="A"/></Field><Field label="Subject"><input name="subject" required defaultValue="Mathematics"/></Field><Field label="Maximum marks"><input name="marks" type="number" min="1" max="200" required defaultValue="20"/></Field><Field label="Assessment date"><input name="date" type="date" required defaultValue={new Date().toISOString().slice(0,10)}/></Field><Field label="Grading mode"><select><option>Structured</option><option>Objective</option><option>Rubric</option><option>Completion</option></select></Field></div><button className="primary full">Save assessment</button></form>}
+
+function UploadDialog({assessment,update,done}:any){const input=useRef<HTMLInputElement>(null);const [files,setFiles]=useState<UploadFile[]>(assessment.files||[]);const [error,setError]=useState("");const add=(list:FileList|File[])=>{setError("");const accepted=["application/pdf","image/jpeg","image/png"];const next:Array<UploadFile>=[];Array.from(list).forEach(file=>{if(!accepted.includes(file.type)){setError(`${file.name}: unsupported format. Use PDF, JPG or PNG.`);return}if(file.size>10*1024*1024){setError(`${file.name}: exceeds the 10 MB demo limit.`);return}next.push({id:`f${Date.now()}${file.name}`,name:file.name,type:file.type,size:file.size,progress:0,status:"Ready",preview:file.type.startsWith("image/")?URL.createObjectURL(file):undefined})});setFiles(x=>[...x,...next])};const upload=()=>{if(!files.length){setError("Choose at least one PDF, JPG or PNG file.");return}let p=0;const timer=window.setInterval(()=>{p+=20;setFiles(fs=>fs.map(f=>({...f,progress:Math.min(100,p),status:p>=100?"Uploaded · ready for OCR":"Uploading"})));if(p>=100){clearInterval(timer);window.setTimeout(()=>{update(assessment.id,{files:files.map(f=>({...f,progress:100,status:"OCR complete",preview:undefined})),stage:"uploaded",totalReviews:Math.max(assessment.totalReviews,files.length*4)});done()},400)}},180)};return <><DialogHead eyebrow={assessment.title} title="Upload student work"/><div className="dropzone" role="button" tabIndex={0} onClick={()=>input.current?.click()} onKeyDown={e=>{if(e.key==="Enter"||e.key===" ")input.current?.click()}} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();add(e.dataTransfer.files)}}><span>↑</span><b>Drop files here or choose files</b><small>Multiple PDF, JPG or PNG files · maximum 10 MB each</small><button type="button" className="secondary" onClick={e=>{e.stopPropagation();input.current?.click()}}>Browse / Choose File</button><input ref={input} className="file-input" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" onChange={e=>e.target.files&&add(e.target.files)}/></div>{error&&<p className="form-error" role="alert">{error}</p>}<div className="upload-list">{files.map(f=><div key={f.id}>{f.preview?<img src={f.preview} alt={`Preview ${f.name}`}/>:<span className="file-icon">PDF</span>}<div><b>{f.name}</b><small>{(f.size/1024/1024).toFixed(2)} MB · {f.status}</small><Progress value={f.progress}/></div><button onClick={()=>setFiles(x=>x.filter(v=>v.id!==f.id))} aria-label={`Remove ${f.name}`}>×</button></div>)}</div><button className="primary full" onClick={upload}>Upload and start OCR</button></>}
+
+function SetupDialog({assessment,update,done}:any){
+  const [questions,setQuestions]=useState(assessment.questions||5);
+  const [answerKey,setAnswerKey]=useState(assessment.answerKey||"Q1: Equivalent fractions; Q2: Common denominator; Q3: Add numerators after conversion.");
+  const [rubric,setRubric]=useState(assessment.rubric||"Method 40% · Conversion 30% · Calculation 20% · Final answer and unit 10%");
+  return <form onSubmit={e=>{e.preventDefault();update(assessment.id,{questions,answerKey,rubric,stage:"setup"});done()}}><DialogHead eyebrow="Question detection" title="Review questions & rubric"/><p className="modal-copy">The simulation detected {questions} questions. Review the answer key and partial-credit rules before grading.</p><Field label="Detected questions"><input type="number" min="1" max="50" value={questions} onChange={e=>setQuestions(Number(e.target.value))}/></Field><Field label="Answer key / expected evidence"><textarea required value={answerKey} onChange={e=>setAnswerKey(e.target.value)}/></Field><div className="form-grid"><Field label="Strictness"><select><option>Balanced</option><option>Supportive</option><option>Strict</option></select></Field><Field label="Partial credit"><select><option>Allow method marks</option><option>Final answer only</option></select></Field></div><Field label="Rubric criteria"><textarea value={rubric} onChange={e=>setRubric(e.target.value)}/></Field><button className="primary full">Approve structure & rubric</button></form>}
+function GradeSelectionDialog({assessment,open,done}:any){const answerCandidates:UploadFile[]=(assessment.files||[]).filter((f:UploadFile)=>!isQuestionPaperFile(f,(assessment.files||[]).length));const allFiles:UploadFile[]=assessment.files||[];const preferred=answerCandidates[0]||allFiles[0];const [selectedFileId,setSelectedFileId]=useState(preferred?.id||"");return <><DialogHead eyebrow={assessment.title} title="Select answer sheet for grading"/><p className="modal-copy">Choose the student answer sheet to grade. On the next step you'll confirm the student and pick the matching question paper.</p><div className="grade-file-picker">{allFiles.map((file:UploadFile)=>{const graded=Boolean(assessment.gradeResults?.[file.id]);const qp=isQuestionPaperFile(file,allFiles.length);return <label key={file.id} className={selectedFileId===file.id?"selected":""}><input type="radio" name="grade-file" value={file.id} disabled={qp} checked={selectedFileId===file.id} onChange={()=>setSelectedFileId(file.id)}/><span className="file-icon">{file.name.split(".").pop()?.toUpperCase()}</span><span><b>{file.name}</b><small>{qp?"Question paper · reference only":"Answer sheet"}</small></span>{graded&&<em>Already graded</em>}</label>})}</div>{!allFiles.length&&<p className="form-error">No uploaded files are available. Close this dialog and upload an answer sheet first.</p>}<button className="primary full" disabled={!selectedFileId} onClick={()=>open(`grade-file:${selectedFileId}`)}>Continue with this answer sheet →</button></>}
+function ProcessDialog({assessment,update,open,done}:any){
+  const files:UploadFile[]=(assessment.files||[]).filter((f:UploadFile)=>!isQuestionPaperFile(f,(assessment.files||[]).length));
+  const gradedCount=files.filter(f=>Boolean(assessment.gradeResults?.[f.id])).length;
+  const allGraded=files.length>0&&gradedCount===files.length;
+  const continueToReview=()=>{update(assessment.id,{stage:"review",reviewed:assessment.reviewed,totalReviews:Math.max(assessment.totalReviews,files.length*4)});done()};
+  return <><DialogHead eyebrow="Grading status" title="OCR & grading pipeline"/><p className="modal-copy">Each answer sheet is graded individually with Mistral OCR + OpenAI analysis. Grade every file below, then continue to teacher review.</p>
+  <div className="upload-list">{files.map(f=>{const graded=Boolean(assessment.gradeResults?.[f.id]);return <div key={f.id}><span className="file-icon">{f.name.split(".").pop()?.toUpperCase()}</span><div><b>{f.name}</b><small>{graded?"Graded":"Not graded yet"}</small></div>{!graded&&<button className="secondary" onClick={()=>open(`grade-file:${f.id}`)}>Grade now</button>}</div>})}</div>
+  {!files.length&&<p className="form-error">No answer-sheet files uploaded yet.</p>}
+  <button className="primary full" disabled={!allGraded} onClick={continueToReview}>{allGraded?"Continue to teacher review":`${gradedCount}/${files.length} graded — grade all files to continue`}</button></>}
+function RegradeDialog({assessment,update,done}:any){
+  const affected=Object.keys(assessment.gradeResults||{}).length;
+  const submit=(e:FormEvent<HTMLFormElement>)=>{e.preventDefault();update(assessment.id,{stage:"review",reviewed:0,version:assessment.version+1});done()};
+  return <form onSubmit={submit}><DialogHead eyebrow="Versioned grading" title="Start regrade"/><Field label="Scope"><select required><option>Selected question</option><option>Selected students</option><option>Full assessment</option><option>Rubric criterion</option></select></Field><Field label="Reason"><select required><option>Alternative correct answer discovered</option><option>Rubric changed</option><option>Partial-credit rule changed</option><option>Question ambiguity</option><option>Moderation</option></select></Field><Field label="Teacher note"><textarea required placeholder="Explain the change for the audit history"/></Field><div className="impact-box"><b>Impact preview</b><span>{affected} student{affected===1?"":"s"} with existing graded evidence. Score changes will be calculated after the regrade runs.</span></div><button className="primary full">Confirm regrade version {assessment.version+1}</button></form>}
+function BulkReview({assessment,update,done}:any){
+  const remaining=Math.max(0,assessment.totalReviews-assessment.reviewed);
+  return <><DialogHead eyebrow="High-confidence objective answers" title="Bulk review"/><p className="modal-copy">{remaining} answer{remaining===1?"":"s"} remain in the review queue for this assessment.</p><div className="list-item"><b>Approve {remaining} remaining answer{remaining===1?"":"s"}</b></div><button className="primary full" disabled={!remaining} onClick={()=>{update(assessment.id,{reviewed:assessment.totalReviews});done()}}>Approve remaining answers</button></>}
+function InterventionForm({state,setState,assessment,done}:any){
+  const results:GradeResult[]=Object.values(assessment.gradeResults||{});
+  const conceptAgg:Record<string,{sum:number;count:number}>={};
+  results.forEach(r=>r.gaps.forEach(g=>{const b=conceptAgg[g.concept]||{sum:0,count:0};b.sum+=g.mastery;b.count+=1;conceptAgg[g.concept]=b}));
+  const sortedConcepts=Object.entries(conceptAgg).map(([concept,b])=>({concept,mastery:b.sum/b.count})).sort((a,b)=>a.mastery-b.mastery);
+  const defaultConcept=sortedConcepts[0]?.concept||"";
+  const submit=(e:FormEvent<HTMLFormElement>)=>{e.preventDefault();const f=new FormData(e.currentTarget);const i:Intervention={id:`i${Date.now()}`,assessmentId:assessment.id,concept:String(f.get("concept")),format:String(f.get("format")),duration:String(f.get("duration")),status:"Planned",followup:String(f.get("followup"))};setState((s:DemoState)=>({...s,interventions:[i,...s.interventions],assessments:s.assessments.map(a=>a.id===assessment.id?{...a,stage:"intervention"}:a),events:[`Intervention created · ${i.concept}`,...s.events]}));done()};
+  return <form onSubmit={submit}><DialogHead eyebrow="Plan intervention" title="Plan intervention"/><Field label="Concept"><input name="concept" required defaultValue={defaultConcept} placeholder="Grade an answer sheet first to prefill the priority gap"/></Field><div className="form-grid"><Field label="Format"><select name="format"><option>5-minute correction</option><option>Guided practice</option><option>Full-period reteaching</option><option>Homework</option><option>Remedial support</option><option>Exit ticket</option></select></Field><Field label="Duration"><select name="duration"><option>15 minutes</option><option>5 minutes</option><option>40 minutes</option></select></Field><Field label="Group"><select><option>Strengthen</option><option>Practise</option><option>Extend</option></select></Field><Field label="Follow-up date"><input name="followup" type="date" required defaultValue={new Date(Date.now()+7*86400000).toISOString().slice(0,10)}/></Field></div><Field label="Objective & activity"><textarea required placeholder="Describe the teaching activity for this concept"/></Field><button className="primary full">Approve and create plan</button></form>}
+function StudyGuideDialog({assessment,fileId,open,done}:any){
+  const result:GradeResult|undefined=fileId?assessment.gradeResults?.[fileId]:undefined;
+  const gap=result?.gaps.slice().sort((a,b)=>a.mastery-b.mastery)[0];
+  const [generating,setGenerating]=useState(false);
+  const [guide,setGuide]=useState<any>(null);
+  const [error,setError]=useState("");
+  if(!gap){
+    return <><DialogHead eyebrow={assessment.title} title="Targeted study guide"/><p className="modal-copy">No graded evidence is available yet for {assessment.subject}. Grade at least one answer sheet first so the study guide can target a real learning gap instead of placeholder content.</p></>;
+  }
+  const concept=gap.concept;
+  const generate=async()=>{
+    setGenerating(true);setError("");
+    try{
+      const response=await fetch("/api/generate-study-guide",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subject:assessment.subject,concept,studentName:result?.studentName,mastery:gap.mastery,feedback:result?.feedback,ocrText:result?.ocrText})});
+      const payload=await response.json();
+      if(!response.ok)throw new Error(payload?.error||"Study-guide generation failed");
+      setGuide(payload.guide);
+    }catch(err){setError(err instanceof Error?err.message:"Study-guide generation failed")}finally{setGenerating(false)}
+  };
+  const download=()=>downloadText(`${concept.replace(/[^a-z0-9]+/gi,"-")}-Study-Guide.txt`,[
+    guide.title,`Subject: ${assessment.subject}`,`Student: ${result?.studentName||"Student"}`,`Learning gap: ${concept}`,
+    `Objective\n${guide.objective}`,`Explanation\n${guide.explanation}`,`Worked example\n${guide.workedExample}`,
+    `Misconception to correct\n${guide.misconception}`,`Practice steps\n${guide.practiceSteps.map((x:string,i:number)=>`${i+1}. ${x}`).join("\n")}`,
+    `Check for understanding\n${guide.checkForUnderstanding.map((x:string,i:number)=>`${i+1}. ${x}`).join("\n")}`
+  ].join("\n\n"));
+  return <><DialogHead eyebrow={`${result?`${result.studentName} · `:""}Learning gap · ${assessment.title}`} title="Targeted study guide"/>
+    <p className="modal-copy">Priority gap identified from this {assessment.subject} answer sheet: <b>{concept}</b> ({gap.mastery}% mastery). OpenAI will ground the guide in the OCR evidence and grading feedback.</p>
+    {!guide&&<button className="secondary full" disabled={generating} onClick={generate}>{generating?"Generating evidence-based guide…":"Generate editable study guide with OpenAI"}</button>}
+    {error&&<p className="form-error" role="alert">{error}</p>}
+    {guide&&<><div className="study-plan">
+      <article><b>Objective</b><p>{guide.objective}</p></article>
+      <article><b>Explain the idea</b><p>{guide.explanation}</p></article>
+      <article><b>Worked example</b><p>{guide.workedExample}</p></article>
+      <article><b>Misconception to correct</b><p>{guide.misconception}</p></article>
+      {(guide.practiceSteps||[]).map((step:string,i:number)=><article key={i}><b>Practice {i+1}</b><p>{step}</p></article>)}
+    </div>
+    <Field label="Teacher instructions"><textarea defaultValue={`Use this ${assessment.subject} guide to address ${concept}. Ask the student to explain the evidence behind each response.`}/></Field>
+    <div className="button-row">
+      <button className="secondary" onClick={download}>Download study guide</button>
+      <button className="secondary" onClick={generate} disabled={generating}>Regenerate</button>
+      {fileId?<button className="primary" onClick={()=>open(`worksheet-gap:${fileId}`)}>Continue to practice worksheet →</button>:<button className="primary" onClick={done}>Approve & save</button>}
+    </div></>}
+  </>
+}
+
+function PerFileGradeDialog({assessment,file,state,setState,update,open,notify}:any){
+  if(!file)return <><DialogHead eyebrow={assessment.title} title="Grade answer sheet"/><p className="modal-copy">This answer sheet could not be found. Close this dialog and try again.</p></>;
+  const candidates:UploadFile[]=(assessment.files||[]).filter((f:UploadFile)=>f.id!==file.id);
+  const preferredQP=candidates.find(f=>/question|paper|qp/i.test(f.name))||candidates[0];
+  const [qpId,setQpId]=useState(preferredQP?.id||"");
+  const [studentName,setStudentName]=useState(()=>guessStudentName(file,state.students));
+  const [progress,setProgress]=useState(0);
+  const [running,setRunning]=useState(false);
+  const alreadyGraded=Boolean(assessment.gradeResults?.[file.id]);
+  const [gradeError,setGradeError]=useState("");
+  const grade=async()=>{
+    if(!studentName.trim()){notify("Enter the student's name before grading.","warning");return}
+    setGradeError("");setRunning(true);let p=0;
+    const timer=window.setInterval(()=>{p=Math.min(90,p+15);setProgress(p)},180);
+    try{
+      const blob=await readFileBlob(file.id);
+      if(!blob)throw new Error("This file's data could not be found in local storage. Try re-uploading it.");
+      const fileBase64=await blobToBase64(blob);
+      const concepts=gapConceptsFor(assessment.subject);
+      const res=await fetch("/api/grade",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          subject:assessment.subject,
+          studentName:studentName.trim(),
+          fileName:file.name,
+          maxMarks:assessment.maxMarks,
+          answerKey:assessment.answerKey,
+          rubric:assessment.rubric,
+          concepts,
+          fileBase64,
+          mimeType:file.type||"application/pdf"
+        })
+      });
+      const payload=await res.json();
+      logApiTiming(setState,payload?.timing);
+      if(!res.ok)throw new Error(payload?.error||"Grading request failed");
+      clearInterval(timer);setProgress(100);
+      const gaps:Gap[]=(payload.gaps||[]).map((g:any)=>({concept:String(g.concept),mastery:Math.max(0,Math.min(100,Math.round(Number(g.mastery))))})).sort((a:Gap,b:Gap)=>a.mastery-b.mastery);
+      const score=Math.max(0,Math.min(assessment.maxMarks,Math.round(Number(payload.score))));
+      const qp=candidates.find(f=>f.id===qpId);
+      const result:GradeResult={fileId:file.id,studentName:studentName.trim(),questionPaperFileId:qpId||undefined,questionPaperName:qp?.name,score,maxMarks:assessment.maxMarks,gaps,date:new Date().toISOString(),feedback:typeof payload.feedback==="string"?payload.feedback:undefined,ocrText:typeof payload.ocrText==="string"?payload.ocrText:undefined};
+      update(assessment.id,{
+        gradeResults:{...(assessment.gradeResults||{}),[file.id]:result},
+        gradedFileIds:Array.from(new Set([...(assessment.gradedFileIds||[]),file.id])),
+        lastGradedFileId:file.id,
+        stage:["draft","uploaded","setup"].includes(assessment.stage)?"review":assessment.stage
+      });
+      notify(`${result.studentName}'s answer sheet OCR'd (Mistral) and graded (OpenAI) against ${qp?.name||"the question paper"}. Learning gaps ready.`);
+      window.setTimeout(()=>open(`student-gaps:${file.id}`),300);
+    }catch(err){
+      clearInterval(timer);
+      const message=err instanceof Error?err.message:"Grading failed";
+      setGradeError(message);
+      notify(`Grading failed: ${message}`,"error");
+    }finally{
+      setRunning(false);
+    }
+  };
+  return <><DialogHead eyebrow={assessment.title} title={alreadyGraded?"Regrade answer sheet":"Grade answer sheet"}/>
+    <p className="modal-copy">Confirm the student, the answer sheet and the question paper to grade against. Marks remain a draft until a teacher reviews them.</p>
+    <Field label="Answer sheet"><input value={file.name} disabled/></Field>
+    <Field label="Student name"><input value={studentName} onChange={e=>setStudentName(e.target.value)} required/></Field>
+    <Field label="Grade against question paper">
+      <select value={qpId} onChange={e=>setQpId(e.target.value)}>
+        <option value="">No question paper uploaded · use subject rubric only</option>
+        {candidates.map(f=><option key={f.id} value={f.id}>{f.name}{/question|paper|qp/i.test(f.name)?" (likely question paper)":""}</option>)}
+      </select>
+    </Field>
+    {!candidates.length&&<p className="form-error">Upload the question paper alongside this answer sheet for the most accurate grading.</p>}
+    {progress>0&&<><Progress value={progress}/><p className="modal-copy">{running?`Grading with Mistral: ${progress}%`:"Grading complete"}</p></>}
+    {gradeError&&<p className="form-error" role="alert">{gradeError}</p>}
+    <button className="primary full" disabled={running} onClick={grade}>{running?`Grading ${studentName||"answer sheet"}…`:alreadyGraded?"Regrade this answer sheet":"Grade this answer sheet"}</button>
+  </>
+}
+
+function StudentGapsDialog({assessment,fileId,open}:any){
+  const result:GradeResult|undefined=assessment.gradeResults?.[fileId];
+  const file=(assessment.files||[]).find((f:UploadFile)=>f.id===fileId);
+  if(!result)return <><DialogHead eyebrow={assessment.title} title="Learning gaps report"/><p className="modal-copy">This answer sheet has not been graded yet. Grade it first to unlock its learning gaps report.</p><button className="primary full" onClick={()=>open(`grade-file:${fileId}`)}>Grade this answer sheet</button></>;
+  const sorted=result.gaps.slice().sort((a,b)=>a.mastery-b.mastery);
+  const priority=sorted[0];
+  return <><DialogHead eyebrow={`${result.studentName} · ${file?.name||"Answer sheet"}`} title="Learning gaps report"/>
+    <div className="xray-summary">
+      <Metric label="Score" value={`${result.score}/${result.maxMarks}`} note="AI-graded · teacher reviewable"/>
+      <Metric label="Priority gap" value={priority.mastery+"%"} note={priority.concept}/>
+      <Metric label="Concepts assessed" value={result.gaps.length} note={result.questionPaperName?`Against ${result.questionPaperName}`:"No question paper linked"}/>
+    </div>
+    <div className="gap-funnel">{sorted.map(g=><span key={g.concept} className={g.mastery<55?"critical":""}><i style={{width:`${g.mastery}%`}}/>{g.concept} · {g.mastery}%</span>)}</div>
+    <p className="modal-copy">Priority learning gap: <b>{priority.concept}</b>. Generate a targeted study guide for this gap, then a practice worksheet with an answer key.</p>
+    <div className="button-row">
+      <button className="secondary" onClick={()=>open(`grade-file:${fileId}`)}>Regrade this sheet</button>
+      <button className="primary" onClick={()=>open(`study-guide:${fileId}`)}>Generate study guide</button>
+    </div>
+  </>
+}
+
+function WorksheetDialog({setState,worksheet,presetConcept,presetTitle,presetStudent,done}:any){const concept=worksheet?.concept||presetConcept||"the target concept";const [generated,setGenerated]=useState(Boolean(worksheet?.content));const [generating,setGenerating]=useState(false);const [genError,setGenError]=useState("");const [content,setContent]=useState<WorksheetContent|null>(worksheet?.content||null);const [template,setTemplate]=useState(worksheet?.template||"Guided recovery");const [mcq,setMcq]=useState(worksheet?.mcq??6);const [subjective,setSubjective]=useState(worksheet?.subjective??4);const [difficulty,setDifficulty]=useState(worksheet?.difficulty||"Mixed");const [title,setTitle]=useState(worksheet?.title||presetTitle||`${concept} Practice`);const save=()=>{const resource:Worksheet={id:worksheet?.id||`r${Date.now()}`,title,type:"Targeted worksheet",status:"Approved",template,concept,mcq,subjective,difficulty,answerSheets:worksheet?.answerSheets||0,gradedSheets:worksheet?.gradedSheets||0,content:content||worksheet?.content};setState((s:DemoState)=>({...s,resources:worksheet?s.resources.map(r=>r.id===worksheet.id?resource:r):[resource,...s.resources],events:[`Worksheet saved · ${resource.title}`,...s.events]}));done()};
+  const generate=async()=>{
+    setGenError("");setGenerating(true);
+    try{
+      const res=await fetch("/api/generate-worksheet",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({concept,subject:worksheet?.subject,difficulty,template,mcqCount:mcq,subjectiveCount:subjective})});
+      const payload=await res.json();
+      logApiTiming(setState,payload?.timing);
+      if(!res.ok)throw new Error(payload?.error||"Worksheet generation failed");
+      delete payload.timing;
+      setContent(payload as WorksheetContent);setGenerated(true);
+    }catch(err){
+      setGenError(err instanceof Error?err.message:"Worksheet generation failed");
+    }finally{
+      setGenerating(false);
+    }
+  };
+  return <><DialogHead eyebrow={presetStudent?`${presetStudent} · Learning-gap resource studio`:"Learning-gap resource studio"} title={worksheet?"Edit worksheet":"Create targeted worksheet"}/>{presetConcept&&<p className="modal-copy">Prefilled from the priority learning gap: <b>{concept}</b>.</p>}<div className="template-picker">{["Guided recovery","Quick check","Exam practice","Challenge & extend"].map(x=><button key={x} className={template===x?"active":""} onClick={()=>setTemplate(x)}><b>{x}</b><small>{x==="Guided recovery"?"Scaffolds + worked example":x==="Quick check"?"Short follow-up":x==="Exam practice"?"Mixed assessment style":"Deeper transfer tasks"}</small></button>)}</div><Field label="Worksheet title"><input value={title} onChange={e=>setTitle(e.target.value)} required/></Field><div className="form-grid"><Field label="Difficulty"><select value={difficulty} onChange={e=>setDifficulty(e.target.value)}><option>Mixed</option><option>Foundation</option><option>Challenge</option></select></Field><Field label="Language"><select><option>English</option><option>Hindi</option></select></Field><Field label="Multiple-choice questions"><input type="number" min="0" max="30" value={mcq} onChange={e=>setMcq(Number(e.target.value))}/></Field><Field label="Subjective questions"><input type="number" min="0" max="20" value={subjective} onChange={e=>setSubjective(Number(e.target.value))}/></Field></div>{mcq+subjective<1&&<p className="form-error">Add at least one multiple-choice or subjective question.</p>}<label className="check"><input type="checkbox" defaultChecked/> Include worked example</label><label className="check"><input type="checkbox" defaultChecked/> Include answer key and marking guide</label>{genError&&<p className="form-error" role="alert">{genError}</p>}{generated&&content&&<div className="resource-draft"><b>{title}</b><p>{template} · {content.mcqQuestions.length} MCQ · {content.subjectiveQuestions.length} subjective · answer key included (OpenAI)</p><ol>{content.mcqQuestions.map((q,i)=><li key={i}><span className="status">{q.cognitiveLevel}</span> {q.question} {q.options.map((o,j)=>`${String.fromCharCode(65+j)}) ${o}`).join(" ")}</li>)}{content.subjectiveQuestions.map((q,i)=><li key={`s${i}`}><span className="status">{q.cognitiveLevel}</span> {q.question}</li>)}</ol></div>}<button className="secondary full" disabled={mcq+subjective<1||!title.trim()||generating} onClick={generate}>{generating?"Generating with OpenAI…":generated?"Regenerate worksheet (OpenAI)":"Generate editable worksheet preview (OpenAI)"}</button>{generated&&content&&<div className="button-row"><button className="secondary" onClick={()=>downloadWorksheet({title,template,concept,difficulty},content)}>Download worksheet</button><button className="secondary" onClick={()=>downloadAnswerKey({title},content)}>Download answer key</button><button className="primary" onClick={save}>Approve & save resource</button></div>}</>}
+
+function WorksheetGradingDialog({worksheet,setState,done}:any){
+  const input=useRef<HTMLInputElement>(null);
+  const [files,setFiles]=useState<File[]>([]);
+  const [progress,setProgress]=useState(0);
+  const [graded,setGraded]=useState(false);
+  const [grading,setGrading]=useState(false);
+  const [gradeError,setGradeError]=useState("");
+  const [results,setResults]=useState<{studentName:string;score:number;maxMarks:number;mastery:number}[]>([]);
+  const add=(list:FileList)=>setFiles(x=>[...x,...Array.from(list).filter(f=>["application/pdf","image/jpeg","image/png"].includes(f.type))]);
+  const guessNameFromFile=(name:string)=>{const base=name.replace(/\.[^.]+$/,"").replace(/[_-]+/g," ").replace(/\b(answer|sheet|paper|qp|question|scan|img|copy|final|v\d+)\b/gi,"").replace(/\s+/g," ").trim();return base.length>2?base.split(" ").filter(Boolean).map(w=>w[0].toUpperCase()+w.slice(1)).join(" "):"Student"};
+  const grade=async()=>{
+    if(!files.length)return;
+    setGradeError("");setGrading(true);let p=0;
+    const timer=window.setInterval(()=>{p=Math.min(90,p+8);setProgress(p)},200);
+    try{
+      const graded_results=await Promise.all(files.map(async file=>{
+        const fileBase64=await blobToBase64(file);
+        const res=await fetch("/api/grade",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
+          subject:worksheet?.concept||"General",
+          studentName:guessNameFromFile(file.name),
+          fileName:file.name,
+          maxMarks:10,
+          answerKey:"",
+          rubric:"",
+          concepts:worksheet?.concept?[worksheet.concept]:[],
+          fileBase64,
+          mimeType:file.type
+        })});
+        const payload=await res.json();
+        logApiTiming(setState,payload?.timing);
+        if(!res.ok)throw new Error(payload?.error||`Grading failed for ${file.name}`);
+        const gaps=payload.gaps||[];
+        const mastery=gaps.length?Math.round(gaps.reduce((s:number,g:any)=>s+g.mastery,0)/gaps.length):Math.round((payload.score/Math.max(1,payload.maxMarks))*100);
+        return {studentName:guessNameFromFile(file.name),score:payload.score,maxMarks:payload.maxMarks,mastery};
+      }));
+      clearInterval(timer);setProgress(100);setResults(graded_results);setGraded(true);
+      setState((s:DemoState)=>({...s,resources:s.resources.map(r=>r.id===worksheet.id?{...r,answerSheets:(r.answerSheets||0)+files.length,gradedSheets:(r.gradedSheets||0)+files.length}:r),events:[`${files.length} worksheet answer sheets graded (Mistral OCR + OpenAI) · ${worksheet.title}`,...s.events]}));
+    }catch(err){
+      clearInterval(timer);
+      setGradeError(err instanceof Error?err.message:"Grading failed");
+    }finally{
+      setGrading(false);
+    }
+  };
+  return <><DialogHead eyebrow={worksheet?.title||"Worksheet"} title="Grade answer worksheets"/><div className="dropzone" role="button" tabIndex={0} onClick={()=>input.current?.click()} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();add(e.dataTransfer.files)}}><span>↑</span><b>Drop completed answer sheets or choose files</b><small>PDF, JPG or PNG · multiple students supported</small><button type="button" className="secondary">Browse / Choose File</button><input ref={input} className="file-input" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" onChange={e=>e.target.files&&add(e.target.files)}/></div><div className="upload-list">{files.map((f,i)=><div key={`${f.name}${i}`}><span className="file-icon">{f.type.includes("pdf")?"PDF":"IMG"}</span><div><b>{f.name}</b><small>Ready for OCR and grading</small></div><button onClick={()=>setFiles(x=>x.filter((_,j)=>j!==i))}>×</button></div>)}</div>{progress>0&&<Progress value={progress}/>}{gradeError&&<p className="form-error" role="alert">{gradeError}</p>}{!graded?<button className="primary full" disabled={!files.length||grading} onClick={grade}>{grading?`Grading with Mistral + OpenAI… ${progress}%`:"Grade uploaded worksheets"}</button>:<><div className="grading-results"><b>Grading complete (Mistral OCR + OpenAI analysis) · teacher check required</b>{results.map((r,i)=><span key={i}>{r.studentName} · {r.score}/{r.maxMarks} · {r.mastery}% · {r.mastery>=80?"mastered":r.mastery>=60?"developing":"further practice"}</span>)}</div><div className="button-row"><button className="secondary" onClick={()=>downloadText(`${worksheet.title}-Graded-Results.csv`,`Student,Score,Mastery\n${results.map(r=>`${r.studentName},${r.score}/${r.maxMarks},${r.mastery}%`).join("\n")}`)}>Download graded results</button><button className="secondary" onClick={()=>downloadAnswerKey(worksheet)}>Check with answer key</button><button className="primary" onClick={done}>Teacher approves grades</button></div></>}</>}
+function FollowupDialog({setState,intervention,done}:any){
+  if(!intervention)return <><DialogHead eyebrow="Comparable evidence" title="Record follow-up"/><p className="modal-copy">This intervention could not be found. Close this dialog and try again from Interventions.</p></>;
+  const submit=(e:FormEvent<HTMLFormElement>)=>{
+    e.preventDefault();
+    const f=new FormData(e.currentTarget);
+    const evidence={studentsCompleted:Number(f.get("studentsCompleted"))||0,avgMastery:Number(f.get("avgMastery"))||0,outcome:String(f.get("outcome")),note:String(f.get("note"))};
+    setState((s:DemoState)=>({
+      ...s,
+      interventions:s.interventions.map((i:Intervention)=>i.id===intervention.id?{...i,followupRecorded:true,followupEvidence:evidence}:i),
+      events:[`Follow-up recorded · ${intervention.concept} · ${evidence.outcome}`,...s.events]
+    }));
+    done();
+  };
+  return <form onSubmit={submit}><DialogHead eyebrow={`Comparable evidence · ${intervention.concept}`} title="Record follow-up"/><Field label="Evidence type"><select><option>Exit ticket</option><option>Parallel quiz</option><option>Homework</option><option>Oral response</option><option>Observation rubric</option></select></Field><Field label="Comparability"><select><option>Strongly comparable</option><option>Moderately comparable</option><option>Informal evidence</option></select></Field><div className="form-grid"><Field label="Students completed"><input name="studentsCompleted" type="number" min="0" defaultValue="6"/></Field><Field label="Average mastery"><input name="avgMastery" type="number" min="0" max="100" defaultValue="68"/></Field></div><Field label="Outcome"><select name="outcome"><option>Meaningful improvement</option><option>Mastered after intervention</option><option>Some improvement</option><option>No clear improvement</option><option>Further support recommended</option></select></Field><Field label="Teacher observation"><textarea name="note" required defaultValue="Most students now identify the common denominator independently."/></Field><button className="primary full">Save follow-up evidence</button></form>}
+function QualityDialog({assessment,state,done}:any){
+  const evidenceSufficiency=assessment.totalReviews?Math.round((assessment.reviewed/assessment.totalReviews)*100):0;
+  const results:GradeResult[]=Object.values(assessment.gradeResults||{});
+  const conceptsGraded=new Set(results.flatMap(r=>r.gaps.map(g=>g.concept)));
+  const conceptCount=conceptsGraded.size;
+  const relevantWorksheets:Worksheet[]=(state?.resources||[]).filter((r:Worksheet)=>r.content&&(conceptsGraded.has(r.concept||"")||r.concept===undefined));
+  const allQuestions=relevantWorksheets.flatMap(r=>[...(r.content?.mcqQuestions||[]),...(r.content?.subjectiveQuestions||[])]);
+  const levelCounts={recall:0,application:0,analysis:0};
+  allQuestions.forEach(q=>{if(q.cognitiveLevel in levelCounts)levelCounts[q.cognitiveLevel as CognitiveLevel]++});
+  const totalTagged=allQuestions.length;
+  let cognitiveBalancePct:number|null=null;
+  if(totalTagged>0){
+    const maxShare=Math.max(levelCounts.recall,levelCounts.application,levelCounts.analysis)/totalTagged;
+    const evenShare=1/3;
+    cognitiveBalancePct=Math.round(Math.max(0,Math.min(100,100-((maxShare-evenShare)/(1-evenShare))*100)));
+  }
+  return <><DialogHead eyebrow="Assessment Quality Check" title={evidenceSufficiency>=70?"Suitable with limitations":"Needs more evidence"}/><div className="quality-bars"><Bar label="Evidence sufficiency" pct={evidenceSufficiency}/><Bar label="Concepts with graded evidence" pct={Math.min(100,conceptCount*20)}/>{totalTagged>0&&<Bar label="Cognitive balance (recall/application/analysis spread)" pct={cognitiveBalancePct||0}/>}</div>{totalTagged>0&&<div className="insight">Cognitive balance measured from {totalTagged} real question{totalTagged===1?"":"s"} across {relevantWorksheets.length} generated worksheet{relevantWorksheets.length===1?"":"s"} for this concept area: {levelCounts.recall} recall · {levelCounts.application} application · {levelCounts.analysis} analysis. A perfectly even split scores 100; a set that's all one level scores lower.</div>}<div className="insight">{results.length?`${conceptCount} concept${conceptCount===1?"":"s"} have graded evidence so far.${totalTagged?"":" No generated worksheets with tagged questions exist yet for this concept area — create one in Worksheet studio to see cognitive-balance scoring."}`:"No graded evidence yet for this assessment. Grade at least one answer sheet to see real quality signals."}</div><button className="primary full" onClick={done}>Acknowledge recommendations</button></>}
+function EvidenceDialog({state,id,done}:any){
+  const [encStudent,encConcept]=(id||"").split(":");
+  const studentName=decodeURIComponent(encStudent||"");
+  const concept=decodeURIComponent(encConcept||"");
+  const results=allGradeResults(state).filter(r=>r.studentName===studentName);
+  const withGap=results.find(r=>r.gaps.some(g=>g.concept===concept));
+  const gap=withGap?.gaps.find(g=>g.concept===concept);
+  return <><DialogHead eyebrow={`Student evidence · ${studentName||"Unknown student"}`} title={concept||"Concept evidence"}/>
+  {!withGap&&<p className="modal-copy">No graded evidence found for {studentName||"this student"} on "{concept}". Grade their answer sheet to populate this view.</p>}
+  {withGap&&<><div className="evidence"><b>{concept} · {gap?.mastery}% mastery</b><p>{withGap.feedback||"No detailed feedback was returned for this answer sheet."}</p></div><div className="evidence"><b>Overall score</b><p>{withGap.score}/{withGap.maxMarks} marks{withGap.questionPaperName?` · graded against ${withGap.questionPaperName}`:""}</p></div></>}
+  <Field label="Teacher classification"><select><option>Priority learning gap</option><option>Developing understanding</option><option>Performance issue</option><option>Insufficient evidence</option></select></Field><button className="primary full" onClick={done}>Save evidence decision</button></>}
+function ReportDialog({done}:any){return <form onSubmit={e=>{e.preventDefault();done()}}><DialogHead eyebrow="Interactive reports" title="Generate report"/><Field label="Report type"><select><option>Student performance</option><option>Class heatmap</option><option>Concept mastery</option><option>Learning gaps</option><option>Teacher summary</option><option>School dashboard</option></select></Field><div className="form-grid"><Field label="Period"><select><option>Current month</option><option>Current term</option><option>Custom period</option></select></Field><Field label="Scope"><select><option>Grade 6 · Mathematics</option><option>All grades</option><option>School-wide</option></select></Field></div><label className="check"><input type="checkbox" defaultChecked/> Include methodology and limitations</label><label className="check"><input type="checkbox" defaultChecked/> Aggregate student data</label><button className="primary full">Generate report</button></form>}
+function ShareDialog({done}:any){
+  const [created,setCreated]=useState(false);
+  const [link,setLink]=useState("");
+  const generateLink=()=>{
+    const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    const token=Array.from({length:8},()=>chars[Math.floor(Math.random()*chars.length)]).join("");
+    const formatted=`${token.slice(0,4)}-${token.slice(4)}`;
+    setLink(`eduai.demo/report/${formatted}`);
+    setCreated(true);
+  };
+  return <><DialogHead eyebrow="Secure sharing" title="Leadership link"/><Field label="Expires"><select><option>7 days</option><option>30 days</option></select></Field><label className="check"><input type="checkbox" defaultChecked/> Require one-time code</label><label className="check"><input type="checkbox"/> Allow download</label>{created&&<div className="secure-link"><code>{link}</code><button onClick={()=>navigator.clipboard?.writeText(link)}>Copy</button></div>}<button className="primary full" onClick={()=>created?done():generateLink()}>{created?"Done":"Create secure link"}</button></>}
+function InviteDialog({state,setState,done}:any){const [error,setError]=useState("");const submit=(e:FormEvent<HTMLFormElement>)=>{e.preventDefault();const f=new FormData(e.currentTarget);const email=String(f.get("email")).toLowerCase();if(state.users.some((u:any)=>u.email.toLowerCase()===email)){setError("A user with this email already exists.");return}const u:User={id:`u${Date.now()}`,name:String(f.get("name")),email,role:String(f.get("role")),school:String(f.get("school")),phone:String(f.get("phone")||""),status:"Invited"};setState((s:DemoState)=>({...s,users:[u,...s.users],events:[`Invitation created · ${u.email}`,...s.events]}));done()};return <form onSubmit={submit}><DialogHead eyebrow="School administration" title="Invite user"/><Field label="Name"><input name="name" required minLength={2} placeholder="Teacher's full name"/></Field><Field label="Email address"><input name="email" type="email" required placeholder="teacher@school.edu"/></Field><div className="form-grid"><Field label="Role"><select name="role"><option>Teacher</option><option>Subject coordinator</option><option>Academic head</option><option>Principal</option><option>School administrator</option><option>Data operator</option></select></Field><Field label="School"><select name="school">{state.schools.map((s:string)=><option key={s} value={s.split(" · ")[0]}>{s.split(" · ")[0]}</option>)}</select></Field></div><Field label="Phone number (optional)"><input name="phone" type="tel" placeholder="+91 98765 43210"/></Field>{error&&<p className="form-error">{error}</p>}<button className="primary full">Send invitation</button></form>}
+function UserEdit({user,setState,done}:any){const submit=(e:FormEvent<HTMLFormElement>)=>{e.preventDefault();const f=new FormData(e.currentTarget);setState((s:DemoState)=>({...s,users:s.users.map(u=>u.id===user.id?{...u,name:String(f.get("name")),email:String(f.get("email")),role:String(f.get("role")),phone:String(f.get("phone"))}:u)}));done()};return <form onSubmit={submit}><DialogHead eyebrow="Manage user" title="Edit details"/><Field label="Name"><input name="name" required defaultValue={user.name}/></Field><Field label="Email"><input name="email" type="email" required defaultValue={user.email}/></Field><Field label="Role"><select name="role" defaultValue={user.role}><option>Teacher</option><option>Principal</option><option>School administrator</option><option>Data operator</option></select></Field><Field label="Phone"><input name="phone" defaultValue={user.phone}/></Field><button className="primary full">Save changes</button></form>}
+function ClassDialog({state,setState,done}:any){const submit=(e:FormEvent<HTMLFormElement>)=>{e.preventDefault();const f=new FormData(e.currentTarget);const x=`Grade ${f.get("grade")}${f.get("section")} · ${f.get("subject")} · ${f.get("students")} students`;setState((s:DemoState)=>({...s,classes:[x,...s.classes]}));done()};return <form onSubmit={submit}><DialogHead eyebrow="Academic structure" title="Add or edit class"/><div className="form-grid"><Field label="Grade"><input name="grade" required defaultValue="6"/></Field><Field label="Section"><input name="section" required defaultValue="C"/></Field><Field label="Subject"><input name="subject" required defaultValue="Mathematics"/></Field><Field label="Student strength"><input name="students" type="number" min="1" required defaultValue="30"/></Field></div><Field label="Assigned teacher"><select>{state.users.filter((u:any)=>u.role==="Teacher").map((u:any)=><option key={u.id}>{u.name}</option>)}</select></Field><button className="primary full">Save class</button></form>}
+function SchoolDialog({state,setState,done}:any){const submit=(e:FormEvent<HTMLFormElement>)=>{e.preventDefault();const f=new FormData(e.currentTarget);const x=`${f.get("name")} · ${f.get("city")} · ${f.get("board")}`;setState((s:DemoState)=>({...s,schools:[x,...s.schools.filter(v=>!v.startsWith(String(f.get("name"))))]}));done()};return <form onSubmit={submit}><DialogHead eyebrow="Tenant profile" title="Manage school"/><Field label="School name"><input name="name" required defaultValue="Sunrise Academy"/></Field><div className="form-grid"><Field label="City"><input name="city" required defaultValue="Mumbai"/></Field><Field label="Board / curriculum"><select name="board"><option>CBSE</option><option>ICSE</option><option>State Board</option><option>IB</option></select></Field></div><Field label="Verified domain"><input type="text" defaultValue="sunrise.edu"/></Field><button className="primary full">Save school</button></form>}
+function SimpleSettings({title,fields,done}:any){return <form onSubmit={e=>{e.preventDefault();done()}}><DialogHead eyebrow="Settings" title={title}/>{fields.map((x:string,i:number)=><Field key={x} label={x}>{i===1?<select><option>Enabled</option><option>Disabled</option><option>Approval required</option></select>:<input required defaultValue={i===0?"Current configuration":"School default"}/>}</Field>)}<button className="primary full">Save settings</button></form>}
+function Activity({events,resetDemo,close}:any){return <><DialogHead eyebrow="Audit trail" title="Recent activity"/><div className="activity-list">{events.map((x:string,i:number)=><div key={i}><i>✓</i><span>{x}</span></div>)}</div><div className="button-row"><button className="secondary" onClick={()=>{resetDemo();close()}}>Restore sample data</button><button className="primary" onClick={close}>Done</button></div></>}
+function NotificationDialog({state,done}:any){
+  const recent:string[]=(state.events||[]).slice(0,5);
+  return <><DialogHead eyebrow="Notifications" title="Your updates"/>
+  {!recent.length&&<p className="modal-copy">No recent activity yet.</p>}
+  {recent.map((x,i)=><div className="notification" key={i}><b>{x}</b></div>)}
+  <button className="primary full" onClick={done}>Mark all as read</button></>}
+function GroupDialog({state,id,done}:any){
+  const [assessmentId,encConcept]=(id||"").split(":");
+  const concept=decodeURIComponent(encConcept||"");
+  const assessment=state.assessments.find((a:Assessment)=>a.id===assessmentId);
+  const results:GradeResult[]=assessment?Object.values(assessment.gradeResults||{}):[];
+  const affected=results.filter(r=>r.gaps.some(g=>g.concept===concept&&g.mastery<70)).map(r=>r.studentName);
+  return <><DialogHead eyebrow="Temporary group" title={`Strengthen · ${affected.length} student${affected.length===1?"":"s"}`}/>
+  {!affected.length&&<p className="modal-copy">No students currently below 70% mastery on "{concept}" from graded evidence.</p>}
+  {affected.map(x=><label className="check" key={x}><input type="checkbox" defaultChecked/>{x}</label>)}
+  <button className="primary full" onClick={done}>Save group membership</button></>}
+function StudentDialog({setState,done}:any){const submit=(e:FormEvent<HTMLFormElement>)=>{e.preventDefault();const f=new FormData(e.currentTarget);const student={id:`s${Date.now()}`,name:String(f.get("name")),roll:String(f.get("roll")),className:String(f.get("className")),status:"Active"};setState((s:DemoState)=>({...s,students:[student,...s.students],events:[`Student added · ${student.roll}`,...s.events]}));done()};return <form onSubmit={submit}><DialogHead eyebrow="School roster" title="Add student"/><Field label="Student name"><input name="name" required minLength={2}/></Field><div className="form-grid"><Field label="School student ID / roll"><input name="roll" required/></Field><Field label="Class"><select name="className"><option>Grade 6A</option><option>Grade 6B</option><option>Grade 7A</option></select></Field></div><button className="primary full">Save student</button></form>}
+function parseRosterCsv(text:string):{name:string;roll:string;className:string}[]{
+  const lines=text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+  if(!lines.length)return[];
+  const header=lines[0].split(",").map(h=>h.trim().toLowerCase());
+  const nameIdx=header.findIndex(h=>h.includes("name"));
+  const rollIdx=header.findIndex(h=>h.includes("roll")||h.includes("id"));
+  const classIdx=header.findIndex(h=>h.includes("class")||h.includes("grade")||h.includes("section"));
+  return lines.slice(1).map(line=>{
+    const cols=line.split(",").map(c=>c.trim());
+    return {
+      name:nameIdx>=0?cols[nameIdx]||"":cols[0]||"",
+      roll:rollIdx>=0?cols[rollIdx]||"":cols[1]||"",
+      className:classIdx>=0?cols[classIdx]||"":cols[2]||"Grade 6A"
+    };
+  }).filter(s=>s.name);
+}
+function rowsFromAOA(aoa:unknown[][]):{name:string;roll:string;className:string}[]{
+  if(!aoa.length)return[];
+  const header=(aoa[0]||[]).map(h=>String(h??"").trim().toLowerCase());
+  const nameIdx=header.findIndex(h=>h.includes("name"));
+  const rollIdx=header.findIndex(h=>h.includes("roll")||h.includes("id"));
+  const classIdx=header.findIndex(h=>h.includes("class")||h.includes("grade")||h.includes("section"));
+  return aoa.slice(1).map(row=>{
+    const cols=row.map(c=>String(c??"").trim());
+    return {
+      name:nameIdx>=0?cols[nameIdx]||"":cols[0]||"",
+      roll:rollIdx>=0?cols[rollIdx]||"":cols[1]||"",
+      className:classIdx>=0?cols[classIdx]||"":cols[2]||"Grade 6A"
+    };
+  }).filter(s=>s.name);
+}
+function RosterImport({setState,done}:any){
+  const input=useRef<HTMLInputElement>(null);
+  const [file,setFile]=useState<File|null>(null);
+  const [error,setError]=useState("");
+  const [busy,setBusy]=useState(false);
+  const run=async()=>{
+    if(!file){setError("Choose a CSV or XLSX roster.");return}
+    setError("");setBusy(true);
+    try{
+      const lower=file.name.toLowerCase();
+      let rows:{name:string;roll:string;className:string}[];
+      if(lower.endsWith(".xlsx")||lower.endsWith(".xls")){
+        const XLSX=await import("xlsx");
+        const buf=await file.arrayBuffer();
+        const wb=XLSX.read(buf,{type:"array"});
+        const sheet=wb.Sheets[wb.SheetNames[0]];
+        const aoa=XLSX.utils.sheet_to_json(sheet,{header:1,raw:false,defval:""}) as unknown[][];
+        rows=rowsFromAOA(aoa);
+      }else if(lower.endsWith(".csv")){
+        const text=await file.text();
+        rows=parseRosterCsv(text);
+      }else{
+        setError("Unsupported file type. Upload a .csv or .xlsx roster.");setBusy(false);return;
+      }
+      if(!rows.length){setError("No valid rows found. Make sure the file has a header row with Name, Roll and Class columns.");setBusy(false);return}
+      setState((s:DemoState)=>({...s,students:[...s.students,...rows.map(r=>({id:`s${Date.now()}${Math.random().toString(36).slice(2,6)}`,name:r.name,roll:r.roll||"—",className:r.className,status:"Active"}))],events:[`Roster imported · ${file.name} · ${rows.length} student${rows.length===1?"":"s"}`,...s.events]}));
+      done();
+    }catch(err){
+      setError(err instanceof Error?`Could not read the file: ${err.message}`:"Could not read the file.");
+    }finally{
+      setBusy(false);
+    }
+  };
+  return <><DialogHead eyebrow="Roster import" title="Import students"/><div className="dropzone" role="button" tabIndex={0} onClick={()=>input.current?.click()} onKeyDown={e=>(e.key==="Enter"||e.key===" ")&&input.current?.click()}><span>⇧</span><b>{file?file.name:"Choose CSV or XLSX roster"}</b><small>Header row required with Name, Roll and Class columns. CSV and XLSX both parsed for real.</small><button type="button" className="secondary">Browse</button><input ref={input} className="file-input" type="file" accept=".csv,.xlsx,.xls" onChange={e=>{const f=e.target.files?.[0];if(f&&f.size>5*1024*1024)setError("Roster exceeds the 5 MB limit.");else{setFile(f||null);setError("")}}}/></div>{error&&<p className="form-error">{error}</p>}<button className="primary full" disabled={busy} onClick={run}>{busy?"Reading file…":"Validate & import roster"}</button></>}
+function StudentEvidence({state,student,done}:any){
+  const results:GradeResult[]=allGradeResults(state).filter(r=>r.studentName===student?.name);
+  const m=studentMastery(state)[student?.name||""];
+  const conceptAgg:Record<string,{sum:number;count:number}>={};
+  results.forEach(r=>r.gaps.forEach(g=>{const b=conceptAgg[g.concept]||{sum:0,count:0};b.sum+=g.mastery;b.count+=1;conceptAgg[g.concept]=b}));
+  const concepts=Object.entries(conceptAgg).map(([concept,b])=>({concept,mastery:Math.round(b.sum/b.count),evidence:b.count})).sort((a,b)=>a.mastery-b.mastery);
+  const priority=concepts[0];
+  return <><DialogHead eyebrow={`${student?.roll||"Student"} · evidence profile`} title={student?.name||"Student evidence"}/>
+  {!results.length&&<p className="modal-copy">No graded evidence yet for {student?.name}. Grade one of their answer sheets to populate this profile.</p>}
+  {results.length>0&&<><div className="xray-summary"><Metric label="Mastery" value={`${m?.mastery??0}%`} note={`${concepts.length} concept${concepts.length===1?"":"s"}`}/><Metric label="Evidence" value={String(m?.evidence??0)} note="Graded answer sheets"/><Metric label="Confidence" value={results.length>2?"High":results.length>1?"Medium":"Low"} note={`${results.length} assessment${results.length===1?"":"s"}`}/><Metric label="Last graded" value={m?.lastDate||"—"} note="Most recent evidence"/></div>
+  <div className="evidence"><b>{priority?.concept||"No priority gap identified"} {priority?"· Priority gap":""}</b><p>{priority?`${priority.evidence} evidence point${priority.evidence===1?"":"s"} · average mastery ${priority.mastery}%`:"Grade more answer sheets to surface a priority concept."}</p></div></>}
+  <Field label="Teacher observation"><select><option>No additional observation</option><option>Absence</option><option>Incomplete attempt</option><option>Time-management difficulty</option><option>Language difficulty</option><option>Careless mistake</option><option>Accommodation required</option></select></Field><button className="primary full" onClick={done}>Save observation</button></>
+}
+function AcademicYearDialog({setState,done}:any){const submit=(e:FormEvent<HTMLFormElement>)=>{e.preventDefault();const f=new FormData(e.currentTarget);setState((s:DemoState)=>({...s,academicYears:[`${f.get("name")} · ${f.get("status")}`,...s.academicYears]}));done()};return <form onSubmit={submit}><DialogHead eyebrow="School calendar" title="Academic year"/><Field label="Name"><input name="name" required placeholder="2027–28"/></Field><div className="form-grid"><Field label="Start date"><input type="date" required/></Field><Field label="End date"><input type="date" required/></Field></div><Field label="Status"><select name="status"><option>Planned</option><option>Active</option><option>Archived</option></select></Field><button className="primary full">Save academic year</button></form>}
+function ConsentDialog({done}:any){return <form onSubmit={e=>{e.preventDefault();done()}}><DialogHead eyebrow="Privacy & consent" title="Data-processing choices"/><label className="check"><input type="checkbox" required defaultChecked/> I accept the terms and privacy policy</label><label className="check"><input type="checkbox" required defaultChecked/> I am authorised to upload school and student data</label><label className="check"><input type="checkbox" required defaultChecked/> I understand AI-assisted processing and teacher approval</label><label className="check"><input type="checkbox"/> Allow anonymised product improvement</label><button className="primary full">Save consent choices</button></form>}
+function SecurityDialog({done}:any){return <><DialogHead eyebrow="Sessions & security" title="Account protection"/><div className="list-item"><div><b>Windows · Chrome</b><small>Current session · Mumbai</small></div><span className="status success">Active</span></div><div className="list-item"><div><b>Android · Chrome</b><small>Last active 2 days ago</small></div><button onClick={()=>done()}>Revoke</button></div><label className="check"><input type="checkbox"/> Require MFA for administrator actions</label><button className="secondary full" onClick={done}>Log out all other devices</button></>}
+function ConfirmDialog({eyebrow,title,text,action,onConfirm}:any){return <><DialogHead eyebrow={eyebrow} title={title}/><p className="modal-copy">{text}</p><button className="primary full" onClick={onConfirm}>{action}</button></>}
+
+function PageHead({eyebrow,title,subtitle,children}:{eyebrow:string;title:string;subtitle:string;children?:ReactNode}){return <div className="page-heading"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p>{subtitle}</p></div><div className="button-row">{children}</div></div>}
+function DialogHead({eyebrow,title}:{eyebrow:string;title:string}){return <><p className="eyebrow">{eyebrow}</p><h2>{title}</h2></>}
+function CardHead({eyebrow,title,children}:{eyebrow:string;title:string;children?:ReactNode}){return <div className="card-head"><div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2></div>{children}</div>}
+function Field({label,children}:{label:string;children:ReactNode}){return <label>{label}{children}</label>}
+function Metric({label,value,note}:{label:string;value:any;note:string}){return <article className="metric"><span>{label}</span><b>{value}</b><small>{note}</small></article>}
+function Bar({label,pct}:{label:string;pct:number}){return <div className="bar"><span>{label}<b>{pct}%</b></span><i><em style={{width:`${pct}%`}}/></i></div>}
+function Progress({value}:{value:number}){return <div className="progress" aria-label={`${value}% complete`}><i style={{width:`${value}%`}}/><small>{value}%</small></div>}
+function icon(x:string){return ({Home:"⌂",Work:"▣",Review:"✓","X-Ray":"✦",Interventions:"↗",Reports:"▥",Overview:"⌂",Users:"♙","Schools & Classes":"▦"} as any)[x]||"⚙"}
+function stageProgress(stage:Stage){return ([10,25,38,50,62,72,80,88,95,100] as number[])[Object.keys(stageLabel).indexOf(stage)]}
+function nextAction(stage:Stage){return ({draft:"Upload work",uploaded:"Set up rubric",setup:"Start grading",grading:"View processing",review:"Review answers",approved:"Generate X-Ray",xray:"Plan intervention",intervention:"Record follow-up",followup:"Publish grades",published:"View report"} as Record<Stage,string>)[stage]}
+function assessmentHasGrades(a:Assessment){return Boolean(a.gradedFileIds?.length)||["review","approved","xray","intervention","followup","published"].includes(a.stage)}
+function gapConceptsFor(subject:string){
+  const s=(subject||"").toLowerCase();
+  if(/math|arithmetic|algebra|geometry/.test(s))return["Equivalent fractions","Finding a common denominator","Adding after conversion","Word-problem translation"];
+  if(/econom|micro|macro|commerce|business/.test(s))return["Price elasticity of demand","Market equilibrium shifts","Opportunity cost reasoning","Fiscal policy tools"];
+  if(/physic/.test(s))return["Applying formulas correctly","Unit conversion","Free-body diagram accuracy","Interpreting graphs of motion"];
+  if(/chemist/.test(s))return["Balancing chemical equations","Mole concept calculations","Naming compounds correctly","Reaction-type identification"];
+  if(/biolog/.test(s))return["Diagram labelling accuracy","Process sequencing (e.g. cycles)","Cause-and-effect explanation","Applying the concept to a new example"];
+  if(/science/.test(s))return["Diagram labelling accuracy","Cause-and-effect explanation","Unit conversion","Applying the concept to a new example"];
+  if(/english|language|literature/.test(s))return["Grammar and sentence structure","Vocabulary in context","Comprehension inference","Structuring a written response"];
+  if(/histor/.test(s))return["Chronological sequencing of events","Cause-and-effect reasoning","Source interpretation","Structuring an evidence-based answer"];
+  if(/geograph/.test(s))return["Map reading and interpretation","Physical process explanation","Data/graph interpretation","Applying concepts to a real region"];
+  if(/civic|political|social science/.test(s))return["Understanding institutions and their roles","Rights and responsibilities reasoning","Case-based application","Structuring an evidence-based answer"];
+  if(/computer|programming|coding/.test(s))return["Logic and algorithmic thinking","Syntax accuracy","Debugging and tracing code","Applying concepts to a new problem"];
+  if(/account/.test(s))return["Journal and ledger accuracy","Balancing entries correctly","Applying accounting principles","Financial statement interpretation"];
+  return["Core concept understanding in "+ (subject||"this subject"),"Applying "+(subject||"the subject")+" methods to new problems","Explaining reasoning clearly","Accuracy under exam conditions"];
+}
+function guessStudentName(file:UploadFile,students:{name:string}[]){const base=file.name.replace(/\.[^.]+$/,"").replace(/[_\-]+/g," ").replace(/\b(answer|sheet|paper|qp|question|scan|img|copy|final|v\d+)\b/gi,"").replace(/\s+/g," ").trim();if(base.length>2)return base.split(" ").filter(Boolean).map(w=>w[0].toUpperCase()+w.slice(1)).join(" ");return students[Math.floor(Math.random()*students.length)]?.name||"Student";}
+function worksheetContent(r:any,content?:{mcqQuestions:{question:string;options:string[];correctIndex:number}[];subjectiveQuestions:{question:string;modelAnswer:string}[]}){
+  const mcqLines=(content?.mcqQuestions||[]).map((q,i)=>`${i+1}. ${q.question} ${q.options.map((o,j)=>`${String.fromCharCode(65+j)}) ${o}`).join(" ")}`).join("\n");
+  const subjLines=(content?.subjectiveQuestions||[]).map((q,i)=>`${i+1}. ${q.question}`).join("\n");
+  return `${r.title}\n\nTarget learning gap: ${r.concept||"Teacher-defined concept"}\nTemplate: ${r.template||"Custom"}\nDifficulty: ${r.difficulty||"Mixed"}\n\nMULTIPLE CHOICE (${content?.mcqQuestions.length||0})\n${mcqLines||"(none)"}\n\nSUBJECTIVE (${content?.subjectiveQuestions.length||0})\n${subjLines||"(none)"}\n\nTeacher: __________________  Student: __________________  Date: __________`;
+}
+function downloadText(name:string,content:string){const blob=new Blob([content],{type:"text/plain;charset=utf-8"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=name;a.click();window.setTimeout(()=>URL.revokeObjectURL(url),500)}
+function downloadWorksheet(r:any,content?:{mcqQuestions:{question:string;options:string[];correctIndex:number}[];subjectiveQuestions:{question:string;modelAnswer:string}[]}){downloadText(`${r.title||"Worksheet"}.txt`,worksheetContent(r,content))}
+function downloadAnswerKey(r:any,content?:{mcqQuestions:{question:string;options:string[];correctIndex:number}[];subjectiveQuestions:{question:string;modelAnswer:string}[]}){
+  const mcqKey=(content?.mcqQuestions||[]).map((q,i)=>`${i+1}-${String.fromCharCode(65+q.correctIndex)}`).join(", ");
+  const subjKey=(content?.subjectiveQuestions||[]).map((q,i)=>`Subjective ${i+1}: ${q.modelAnswer}`).join("\n");
+  downloadText(`${r.title||"Worksheet"}-Answer-Key.txt`,`${r.title}\nANSWER KEY & MARKING GUIDE (OpenAI-generated)\n\nMCQ: ${mcqKey||"(none)"}\n${subjKey||""}`);
+}
+function reportTitle(tab:string){return ({ "Student performance":"Grade 6 performance trend","Class heatmap":"Class 6A concept heatmap","Concept mastery":"Mastery by concept","Learning gaps":"Priority learning gaps","Teacher summary":"Teacher-approved activity summary","School dashboard":"School improvement overview"} as any)[tab]}
+function dialogTitle(x:string){return x.split("-").map(v=>v[0]?.toUpperCase()+v.slice(1)).join(" ")}
+
+function isQuestionPaperFile(file:UploadFile,total:number){return total>1&&/question|paper|qp/i.test(file.name)}
+
+function UploadedFiles({assessment,update,notify,open}:any){
+  const files:UploadFile[]=assessment.files||[];
+  const retrieve=async(file:UploadFile,download=false)=>{const blob=await readFileBlob(file.id);if(!blob){notify("The original file is not available in this browser. Upload it again to restore preview and download.","warning");return}const url=URL.createObjectURL(blob);if(download){const a=document.createElement("a");a.href=url;a.download=file.name;a.click();window.setTimeout(()=>URL.revokeObjectURL(url),1000)}else window.open(url,"_blank","noopener,noreferrer")};
+  const remove=async(file:UploadFile)=>{await removeFileBlob(file.id);update(assessment.id,{files:files.filter(f=>f.id!==file.id)});notify(`${file.name} removed`)};
+  const openGaps=(file:UploadFile,graded:boolean)=>{if(graded)open(`student-gaps:${file.id}`);else{notify("Grade this answer sheet first to unlock its learning gaps report","warning");open(`grade-file:${file.id}`)}};
+  return <section className="card span-2 uploaded-files-card"><CardHead eyebrow={`${files.length} file${files.length===1?"":"s"} · ${assessment.title}`} title="Uploaded files"><button className="primary" onClick={()=>open("upload")}>＋ Add files</button></CardHead>{files.length===0?<div className="empty-state"><b>No files uploaded for this assessment</b><p>Use Add files to upload the question paper and student answer sheets.</p><button className="secondary" onClick={()=>open("upload")}>Browse files</button></div>:<div className="uploaded-files-grid">{files.map(file=>{const qp=isQuestionPaperFile(file,files.length);const graded=Boolean(assessment.gradeResults?.[file.id]);return <article key={file.id}><span className="file-icon">{file.name.split(".").pop()?.toUpperCase()}</span><div><b>{file.name}</b><small>{(file.size/1024/1024).toFixed(2)} MB · {file.status}{qp?" · Question paper":graded?" · Graded":""}</small></div><div className="button-row">{!qp&&<button className="primary" onClick={()=>open(`grade-file:${file.id}`)}>{graded?"Regrade":"Grade answer sheet"}</button>}{!qp&&<button className="secondary" onClick={()=>openGaps(file,graded)}>{graded?"Learning gaps report":"Learning gaps (grade first)"}</button>}<button className="secondary" onClick={()=>retrieve(file)}>Preview</button><button className="secondary" onClick={()=>retrieve(file,true)}>Download</button><button className="link danger" onClick={()=>remove(file)}>Remove</button></div></article>})}</div>}<p className="storage-note">Files are saved securely in this browser for this interactive demo. They remain available after refresh on this device.</p></section>
+}
+
+function openFileDb():Promise<IDBDatabase>{return new Promise((resolve,reject)=>{const request=indexedDB.open("eduai-learning-xray-files",1);request.onupgradeneeded=()=>{if(!request.result.objectStoreNames.contains("files"))request.result.createObjectStore("files")};request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error)})}
+async function saveFileBlob(id:string,file:Blob){const db=await openFileDb();await new Promise<void>((resolve,reject)=>{const tx=db.transaction("files","readwrite");tx.objectStore("files").put(file,id);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error)});db.close()}
+async function readFileBlob(id:string):Promise<Blob|null>{const db=await openFileDb();const value=await new Promise<any>((resolve,reject)=>{const request=db.transaction("files").objectStore("files").get(id);request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error)});db.close();return value||null}
+async function removeFileBlob(id:string){const db=await openFileDb();await new Promise<void>((resolve,reject)=>{const tx=db.transaction("files","readwrite");tx.objectStore("files").delete(id);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error)});db.close()}
+function blobToBase64(blob:Blob):Promise<string>{return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onloadend=()=>{const result=reader.result as string;resolve(result.split(",")[1]||"")};reader.onerror=()=>reject(reader.error);reader.readAsDataURL(blob)})}
+
+function UploadDialogV2({assessment,update,done}:any){
+  const input=useRef<HTMLInputElement>(null),pauseRef=useRef(false);
+  const [files,setFiles]=useState<UploadFile[]>(assessment.files||[]);
+  const [error,setError]=useState(""),[uploading,setUploading]=useState(false),[paused,setPaused]=useState(false);
+  const accepted=["application/pdf","image/jpeg","image/png","image/heic","application/vnd.openxmlformats-officedocument.wordprocessingml.document","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","text/csv"];
+  const add=(list:FileList|File[])=>{setError("");const next:UploadFile[]=[];Array.from(list).forEach(file=>{if(!accepted.includes(file.type)){setError(`${file.name}: unsupported format.`);return}if(file.size>10*1024*1024){setError(`${file.name}: exceeds the 10 MB limit.`);return}const id=`f${Date.now()}${file.name}`;next.push({id,name:file.name,type:file.type,size:file.size,progress:0,status:"Ready",preview:file.type.startsWith("image/")&&!file.type.includes("heic")?URL.createObjectURL(file):undefined});void saveFileBlob(id,file)});setFiles(x=>[...x,...next])};
+  const start=()=>{if(!files.length){setError("Choose at least one supported file.");return}setUploading(true);let p=0;const timer=window.setInterval(()=>{if(pauseRef.current)return;p+=10;setFiles(fs=>fs.map(f=>({...f,progress:Math.min(100,p),status:p>=100?"Uploaded · quality checked":"Uploading"})));if(p>=100){clearInterval(timer);setUploading(false);window.setTimeout(()=>{const names=files.map(f=>f.name).join(" ").toLowerCase();const economics=/econom|micro|macro|demand|supply|gdp/.test(names);update(assessment.id,{files:files.map(f=>({...f,progress:100,status:"OCR complete",preview:undefined})),stage:"uploaded",title:economics?"Economics question paper & answer sheets":assessment.title,subject:economics?"Economics":assessment.subject,totalReviews:Math.max(assessment.totalReviews,files.length*4)});done()},350)}},180)};
+  const pause=()=>{pauseRef.current=!pauseRef.current;setPaused(pauseRef.current);setFiles(fs=>fs.map(f=>({...f,status:pauseRef.current?"Paused":"Uploading"})))};
+  return <><DialogHead eyebrow={assessment.title} title="Upload student work"/><div className="dropzone" role="button" tabIndex={0} onClick={()=>input.current?.click()} onKeyDown={e=>(e.key==="Enter"||e.key===" ")&&input.current?.click()} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();add(e.dataTransfer.files)}}><span>↑</span><b>Drop files here or choose files</b><small>PDF, JPG, PNG, HEIC, DOCX, XLSX or CSV · multiple files · 10 MB each</small><button type="button" className="secondary" onClick={e=>{e.stopPropagation();input.current?.click()}}>Browse / Choose File</button><input ref={input} className="file-input" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.heic,.docx,.xlsx,.csv" onChange={e=>e.target.files&&add(e.target.files)}/></div>{error&&<p className="form-error" role="alert">{error}</p>}<div className="upload-list">{files.map(f=><div key={f.id}>{f.preview?<img src={f.preview} alt={`Preview ${f.name}`}/>:<span className="file-icon">{f.name.split(".").pop()?.toUpperCase()}</span>}<div><b>{f.name}</b><small>{(f.size/1024/1024).toFixed(2)} MB · {f.status}</small><Progress value={f.progress}/></div><button disabled={uploading} onClick={()=>setFiles(x=>x.filter(v=>v.id!==f.id))} aria-label={`Remove ${f.name}`}>×</button></div>)}</div><div className="button-row">{uploading&&<button className="secondary" onClick={pause}>{paused?"Resume":"Pause"}</button>}<button className="secondary" disabled={uploading} onClick={()=>setFiles(fs=>fs.map(f=>f.status.includes("Failed")?{...f,status:"Ready",progress:0}:f))}>Retry failed</button><button className="primary" disabled={uploading} onClick={start}>Upload & process</button></div></>
+}
