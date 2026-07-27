@@ -5,6 +5,7 @@ type WorksheetRequestBody = {
   template?: string;
   mcqCount?: number;
   subjectiveCount?: number;
+  evidenceSummary?: string;
 };
 
 type CognitiveLevel = "recall" | "application" | "analysis";
@@ -55,7 +56,8 @@ export async function POST(request: Request) {
       `Difficulty: ${difficulty}\n` +
       `Number of multiple-choice questions: ${mcqCount}\n` +
       `Number of subjective questions: ${subjectiveCount}\n\n` +
-      "Generate the worksheet content following the required JSON shape exactly, with the requested question counts.";
+      `Evidence from the uploaded question paper, model answers, answer sheet and grading:\n${(body.evidenceSummary || "No additional evidence supplied").slice(0,12000)}\n\n` +
+      "Generate the worksheet content following the required JSON shape exactly, with the requested question counts. Ground the questions in this evidence and do not switch to an unrelated subject.";
 
     const startedAt = Date.now();
     const res = await fetch("https://api.openai.com/v1/chat/completions", {

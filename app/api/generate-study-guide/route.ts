@@ -5,6 +5,7 @@ type StudyGuideRequest = {
   mastery?: number;
   feedback?: string;
   ocrText?: string;
+  evidenceFiles?: string[];
 };
 
 type StudyGuide = {
@@ -31,6 +32,7 @@ export async function POST(request: Request) {
       `Subject: ${subject}\nStudent: ${body.studentName || "Student"}\nPriority learning gap: ${concept}\n` +
       `Mastery: ${body.mastery ?? "unknown"}%\nGrading feedback: ${body.feedback || "No additional feedback"}\n` +
       `Answer-sheet OCR evidence:\n${(body.ocrText || "").slice(0, 12000) || "No OCR excerpt available"}\n\n` +
+      `Uploaded source set:\n${(body.evidenceFiles || []).join("\n") || "No source filenames supplied"}\n\n` +
       "Create a concise, editable study guide grounded in this evidence. Keep every example and question within the stated subject. " +
       "Do not introduce mathematics examples unless the subject or evidence is mathematical.";
 

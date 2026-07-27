@@ -26,7 +26,7 @@ test("upload accepts every specified demo format and provides recovery controls"
 });
 
 test("uploaded files remain discoverable with cloud bytes and an offline cache", () => {
-  for (const control of ["Uploaded files", "Preview", "Download", "Remove", "Add files"]) assert.ok(app.includes(control), `missing uploaded-file control: ${control}`);
+  for (const control of ["Uploaded evidence", "Preview", "Download", "Remove", "Add files"]) assert.ok(app.includes(control), `missing uploaded-file control: ${control}`);
   assert.match(app, /indexedDB\.open\("eduai-learning-xray-files"/);
   assert.match(app, /saveFileBlob\(id,file\)/);
   assert.match(app, /readFileBlob\(file\.id\)/);
@@ -100,6 +100,15 @@ test("grading derives totals from the assessment and prioritizes an answer key",
   assert.match(app, /questionPaperBase64/);
   assert.match(app, /answerKeyBase64/);
   assert.match(app, /detectedMaxMarks/);
+});
+
+test("work can begin with classified evidence and branded outputs", () => {
+  for (const capability of ["Assessment setup is optional", "Upload evidence", "Question paper", "Model answer / marking scheme", "Ungraded answer sheet", "Teacher-graded answer sheet", "scanned handwriting", "Evidence used", "Built from", "Personalised study guide", "Targeted practice worksheet", "EduAI Hub"]) {
+    assert.ok(app.includes(capability), `missing evidence-first capability: ${capability}`);
+  }
+  assert.match(app, /documentRole/);
+  assert.match(app, /evidenceSummary/);
+  assert.match(app, /BrandDocumentHeader/);
 });
 
 test("Mistral OCR evidence drives OpenAI learning resources", () => {
