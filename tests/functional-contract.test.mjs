@@ -5,10 +5,12 @@ import { readFileSync, existsSync } from "node:fs";
 const app = readFileSync(new URL("../app/ui/FunctionalEduAIApp.tsx", import.meta.url), "utf8");
 const login = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
 
-test("persists demo records and safely upgrades older browser state", () => {
-  assert.match(app, /localStorage\.getItem\("eduai-xray-demo-v4"\)/);
-  assert.match(app, /localStorage\.setItem\("eduai-xray-demo-v4"/);
-  for (const collection of ["students", "resources", "academicYears"]) assert.match(app, new RegExp(`parsed\\.${collection}\\|\\|base\\.${collection}`));
+test("persists workspace records in cloud storage with an offline cache", () => {
+  assert.match(app, /fetch\("\/api\/workspace"/);
+  assert.match(app, /method:"PUT"/);
+  assert.match(app, /localStorage\.getItem\("eduai-xray-offline-cache-v1"\)/);
+  assert.match(app, /localStorage\.setItem\("eduai-xray-offline-cache-v1"/);
+  for (const collection of ["students", "resources", "academicYears"]) assert.match(app, new RegExp(`restored\\.${collection}\\|\\|base\\.${collection}`));
 });
 
 test("covers the complete teacher improvement cycle", () => {
@@ -23,11 +25,12 @@ test("upload accepts every specified demo format and provides recovery controls"
   assert.match(app, /10 MB limit/);
 });
 
-test("uploaded files remain discoverable and retain browser-local file bytes", () => {
+test("uploaded files remain discoverable with cloud bytes and an offline cache", () => {
   for (const control of ["Uploaded files", "Preview", "Download", "Remove", "Add files"]) assert.ok(app.includes(control), `missing uploaded-file control: ${control}`);
   assert.match(app, /indexedDB\.open\("eduai-learning-xray-files"/);
   assert.match(app, /saveFileBlob\(id,file\)/);
   assert.match(app, /readFileBlob\(file\.id\)/);
+  assert.match(app, /fetch\(`\/api\/files\/\$\{encodeURIComponent\(id\)\}`/);
 });
 
 test("teacher modules have persisted, actionable views", () => {
@@ -66,7 +69,7 @@ test("learning-gap worksheet cycle is complete and downloadable", () => {
 });
 
 test("grading stays bound to the selected uploaded assessment", () => {
-  for (const capability of ["assessmentContext(a)", "Economics question paper & answer sheets", "Explain price elasticity of demand", "Graded answer sheet:", "Grade answer sheet"]) {
+  for (const capability of ["assessment.subject", "questionPaperFileId", "answerKey:assessment.answerKey", "Graded answer sheet:", "Grade answer sheet"]) {
     assert.ok(app.includes(capability), `missing selected-assessment grading behavior: ${capability}`);
   }
   assert.match(app, /openAssessment\(selected\.id,"Review"\)/);
@@ -74,9 +77,21 @@ test("grading stays bound to the selected uploaded assessment", () => {
 });
 
 test("teacher explicitly chooses grading or learning-gap analysis", () => {
-  for (const capability of ["Grade answer sheet", "View learning gaps", "Select answer sheet for grading", "Grade selected answer sheet", "Possible question paper", "Possible answer sheet", "gradedFileIds"]) {
+  for (const capability of ["Grade answer sheet", "View learning gaps", "Select answer sheet for grading", "Continue with this answer sheet", "Question paper", "Answer sheet", "gradedFileIds"]) {
     assert.ok(app.includes(capability), `missing explicit grading choice: ${capability}`);
   }
   assert.match(app, /assessmentHasGrades/);
   assert.match(app, /type="radio"/);
+});
+
+test("Mistral OCR evidence drives OpenAI learning resources", () => {
+  const grade = readFileSync(new URL("../app/api/grade/route.ts", import.meta.url), "utf8");
+  const worksheet = readFileSync(new URL("../app/api/generate-worksheet/route.ts", import.meta.url), "utf8");
+  const studyGuide = readFileSync(new URL("../app/api/generate-study-guide/route.ts", import.meta.url), "utf8");
+  assert.match(grade, /mistral-ocr-latest/);
+  assert.match(grade, /gpt-5\.6-sol/);
+  assert.match(worksheet, /Subject: \$\{subject\}/);
+  assert.match(studyGuide, /Answer-sheet OCR evidence/);
+  assert.match(studyGuide, /Do not introduce mathematics examples/);
+  assert.match(app, /fetch\("\/api\/generate-study-guide"/);
 });

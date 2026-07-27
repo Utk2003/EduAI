@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./persistence.css";
 
 :root{--navy:#283b65;--orange:#f6a017;--bg:#f7f7f5;--surface:#fff;--surface2:#f2f3f5;--text:#1d1d1f;--muted:#6e6e73;--border:#dfe1e5;--green:#2e7d32;--red:#b3261e;--purple:#7756a8;--shadow:0 12px 34px rgba(27,36,55,.07)}
 :root[data-theme="dark"]{--bg:#101216;--surface:#191c22;--surface2:#22262e;--text:#f5f5f7;--muted:#a7aab1;--border:#343944;--shadow:0 18px 44px rgba(0,0,0,.24)}

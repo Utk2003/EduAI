@@ -1,0 +1,76 @@
+type StudyGuideRequest = {
+  subject?: string;
+  concept?: string;
+  studentName?: string;
+  mastery?: number;
+  feedback?: string;
+  ocrText?: string;
+};
+
+type StudyGuide = {
+  title: string;
+  objective: string;
+  explanation: string;
+  workedExample: string;
+  misconception: string;
+  practiceSteps: string[];
+  checkForUnderstanding: string[];
+};
+
+export async function POST(request: Request) {
+  try {
+    const body = (await request.json()) as StudyGuideRequest;
+    const subject = body.subject?.trim() || "General";
+    const concept = body.concept?.trim() || "the identified learning gap";
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return Response.json({ error: "OPENAI_API_KEY is not configured." }, { status: 500 });
+
+    const prompt =
+      `Subject: ${subject}\nStudent: ${body.studentName || "Student"}\nPriority learning gap: ${concept}\n` +
+      `Mastery: ${body.mastery ?? "unknown"}%\nGrading feedback: ${body.feedback || "No additional feedback"}\n` +
+      `Answer-sheet OCR evidence:\n${(body.ocrText || "").slice(0, 12000) || "No OCR excerpt available"}\n\n` +
+      "Create a concise, editable study guide grounded in this evidence. Keep every example and question within the stated subject. " +
+      "Do not introduce mathematics examples unless the subject or evidence is mathematical.";
+
+    const startedAt = Date.now();
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.6-sol",
+        messages: [
+          {
+            role: "system",
+            content:
+              "You create evidence-based remedial study guides for teachers. Return only JSON with this exact shape: " +
+              '{"title":string,"objective":string,"explanation":string,"workedExample":string,"misconception":string,' +
+              '"practiceSteps":[string,string,string],"checkForUnderstanding":[string,string,string]}.',
+          },
+          { role: "user", content: prompt },
+        ],
+        response_format: { type: "json_object" },
+      }),
+    });
+    const openaiMs = Date.now() - startedAt;
+    if (!response.ok) {
+      return Response.json(
+        { error: await response.text(), timing: [{ provider: "openai", ms: openaiMs, ok: false }] },
+        { status: response.status }
+      );
+    }
+
+    const data = await response.json();
+    const raw = data?.choices?.[0]?.message?.content;
+    if (typeof raw !== "string") return Response.json({ error: "Empty response from OpenAI" }, { status: 502 });
+
+    let guide: StudyGuide;
+    try {
+      guide = JSON.parse(raw) as StudyGuide;
+    } catch {
+      return Response.json({ error: "OpenAI did not return valid study-guide JSON" }, { status: 502 });
+    }
+    return Response.json({ guide, timing: [{ provider: "openai", ms: openaiMs, ok: true }] });
+  } catch (error) {
+    return Response.json({ error: error instanceof Error ? error.message : "Unexpected error" }, { status: 500 });
+  }
+}
