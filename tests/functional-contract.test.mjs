@@ -5,10 +5,12 @@ import { readFileSync, existsSync } from "node:fs";
 const app = readFileSync(new URL("../app/ui/FunctionalEduAIApp.tsx", import.meta.url), "utf8");
 const login = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
 
-test("persists demo records and safely upgrades older browser state", () => {
-  assert.match(app, /localStorage\.getItem\("eduai-xray-demo-v4"\)/);
-  assert.match(app, /localStorage\.setItem\("eduai-xray-demo-v4"/);
-  for (const collection of ["students", "resources", "academicYears"]) assert.match(app, new RegExp(`parsed\\.${collection}\\|\\|base\\.${collection}`));
+test("persists workspace records in cloud storage with an offline cache", () => {
+  assert.match(app, /fetch\("\/api\/workspace"/);
+  assert.match(app, /method:"PUT"/);
+  assert.match(app, /localStorage\.getItem\("eduai-xray-offline-cache-v1"\)/);
+  assert.match(app, /localStorage\.setItem\("eduai-xray-offline-cache-v1"/);
+  for (const collection of ["students", "resources", "academicYears"]) assert.match(app, new RegExp(`restored\\.${collection}\\|\\|base\\.${collection}`));
 });
 
 test("covers the complete teacher improvement cycle", () => {
@@ -23,11 +25,12 @@ test("upload accepts every specified demo format and provides recovery controls"
   assert.match(app, /10 MB limit/);
 });
 
-test("uploaded files remain discoverable and retain browser-local file bytes", () => {
+test("uploaded files remain discoverable with cloud bytes and an offline cache", () => {
   for (const control of ["Uploaded files", "Preview", "Download", "Remove", "Add files"]) assert.ok(app.includes(control), `missing uploaded-file control: ${control}`);
   assert.match(app, /indexedDB\.open\("eduai-learning-xray-files"/);
   assert.match(app, /saveFileBlob\(id,file\)/);
   assert.match(app, /readFileBlob\(file\.id\)/);
+  assert.match(app, /fetch\(`\/api\/files\/\$\{encodeURIComponent\(id\)\}`/);
 });
 
 test("teacher modules have persisted, actionable views", () => {
