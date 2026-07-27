@@ -97,8 +97,8 @@ test("grading derives totals from the assessment and prioritizes an answer key",
   const grade = readFileSync(new URL("../app/api/grade/route.ts", import.meta.url), "utf8");
   assert.match(grade, /Determine maxMarks dynamically/);
   assert.match(grade, /PRIMARY REFERENCE/);
-  assert.match(app, /questionPaperBase64/);
-  assert.match(app, /answerKeyBase64/);
+  assert.match(app, /questionPaperText/);
+  assert.match(app, /answerKeyFileText/);
   assert.match(app, /detectedMaxMarks/);
 });
 
@@ -113,14 +113,26 @@ test("work can begin with classified evidence and branded outputs", () => {
 
 test("Mistral OCR evidence drives OpenAI learning resources", () => {
   const grade = readFileSync(new URL("../app/api/grade/route.ts", import.meta.url), "utf8");
+  const ocr = readFileSync(new URL("../app/api/ocr/route.ts", import.meta.url), "utf8");
   const worksheet = readFileSync(new URL("../app/api/generate-worksheet/route.ts", import.meta.url), "utf8");
   const studyGuide = readFileSync(new URL("../app/api/generate-study-guide/route.ts", import.meta.url), "utf8");
-  assert.match(grade, /mistral-ocr-latest/);
+  assert.match(ocr, /mistral-ocr-latest/);
   assert.match(grade, /gpt-5\.6-sol/);
   assert.match(worksheet, /Subject: \$\{subject\}/);
   assert.match(studyGuide, /Answer-sheet OCR evidence/);
   assert.match(studyGuide, /Do not introduce mathematics examples/);
   assert.match(app, /authFetch\("\/api\/generate-study-guide"/);
+});
+
+test("OCR must be teacher-validated before CBSE gap analysis", () => {
+  const grade = readFileSync(new URL("../app/api/grade/route.ts", import.meta.url), "utf8");
+  const ocr = readFileSync(new URL("../app/api/ocr/route.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(ocr, /api\.openai\.com/);
+  assert.doesNotMatch(grade, /api\.mistral\.ai/);
+  for (const behavior of ["Check the extracted text", "Teacher validation required", "Validate OCR text & generate learning-gap report", 'authFetch("/api/ocr"', 'authFetch("/api/grade"']) assert.ok(app.includes(behavior), `missing OCR validation behavior: ${behavior}`);
+  assert.match(grade, /Focus ONLY on questions that are completely wrong, partially correct, unanswered, incomplete/);
+  assert.match(grade, /Do not create learning gaps from fully correct answers/);
+  assert.match(grade, /observed error -> immediate gap -> misconception\/skill weakness -> prerequisite gap -> learning consequence/);
 });
 
 test("reanalysis is stable and every diagnosed gap becomes a study-guide topic", () => {

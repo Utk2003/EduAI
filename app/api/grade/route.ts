@@ -1,223 +1,99 @@
-type GradeRequestBody = {
-  subject?: string;
-  studentName?: string;
-  fileName?: string;
-  maxMarks?: number;
-  answerKey?: string;
-  rubric?: string;
-  concepts?: string[];
-  fileBase64?: string; // raw base64, no data: prefix
-  mimeType?: string;
-  questionPaperBase64?: string;
-  questionPaperMimeType?: string;
-  questionPaperName?: string;
-  answerKeyBase64?: string;
-  answerKeyMimeType?: string;
-  answerKeyName?: string;
+import { getAuthenticatedUser, unauthorized } from "../../../lib/supabase-auth";
+
+type GradeRequest = {
+  subject?: string; studentName?: string; fileName?: string; maxMarks?: number;
+  answerKey?: string; rubric?: string; ocrText?: string; questionPaperText?: string;
+  questionPaperName?: string; answerKeyFileText?: string; answerKeyName?: string;
 };
 
-// Step 1: OCR the uploaded answer sheet using Mistral's OCR API.
-// Mistral is used ONLY for text extraction here — no grading/analysis happens in this step.
-async function runMistralOCR(fileBase64: string, mimeType: string, apiKey: string): Promise<{ text: string; ms: number }> {
-  const isPdf = mimeType === "application/pdf";
-  const dataUrl = `data:${mimeType};base64,${fileBase64}`;
+const CBSE_DIAGNOSTIC_PROMPT = `
+You are an expert CBSE academic diagnostician, subject teacher, examiner, curriculum specialist and personalised-learning coach.
+Analyse only teacher-validated OCR text. Mistral has already completed extraction; you never receive or inspect the raw files.
 
-  const document = isPdf
-    ? { type: "document_url", document_url: dataUrl }
-    : { type: "image_url", image_url: dataUrl };
+Focus ONLY on questions that are completely wrong, partially correct, unanswered, incomplete, or received fewer than maximum marks.
+Do not create learning gaps from fully correct answers. Refer to correct work only when it proves an error is isolated or distinguishes knowledge from execution.
+Use the marking scheme/model answer as the primary reference when supplied. Never invent unreadable or missing text, marks, question numbers, teacher comments or student intent.
 
-  const startedAt = Date.now();
-  const res = await fetch("https://api.mistral.ai/v1/ocr", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "mistral-ocr-latest",
-      document,
-    }),
-  });
-  const ms = Date.now() - startedAt;
+For every mark-losing response identify: question number; maximum and awarded marks when visible; chapter/unit; topic and exact micro-concept; expected knowledge/method; what the student wrote; exact point of mark loss; error category; root cause; prerequisite weakness; whether isolated or repeated; future impact; confidence; corrective sequence; practice; and mastery check.
+Classify errors as conceptual, procedural, application, reasoning, interpretation, factual recall, calculation, language/expression, answer completeness, presentation/exam technique, execution, or supported time-management inference.
+Trace: observed error -> immediate gap -> misconception/skill weakness -> prerequisite gap -> learning consequence.
+Combine errors with the same root cause while citing every supporting question number. Use CBSE/NCERT and subject-specific terminology. Diagnose rather than judge.
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Mistral OCR failed: ${errText}`);
-  }
-
-  const data = await res.json();
-  const pages: { markdown?: string }[] = data?.pages || [];
-  const text = pages.map(p => p.markdown || "").join("\n\n").trim();
-
-  if (!text) {
-    throw new Error("Mistral OCR returned no text for this file.");
-  }
-  return { text, ms };
-}
-
-// Step 2: Send the OCR'd text to OpenAI for the actual grading/analysis.
-// OpenAI is used ONLY for analysis here — it never sees the raw file, only extracted text.
-async function runOpenAIAnalysis(
-  ocrText: string,
-  ctx: {
-    subject: string;
-    studentName: string;
-    fileName: string;
-    maxMarks: number;
-    answerKey: string;
-    rubric: string;
-    concepts: string[];
-    questionPaperText: string;
-    answerKeyFileText: string;
-  },
-  apiKey: string
-): Promise<{ score: number; maxMarks: number; gaps: { concept: string; mastery: number; finding:string; misconception:string; evidence:string; rework:string; severity:"priority"|"developing"|"secure" }[]; feedback: string; _ms: number }> {
-  const conceptList = ctx.concepts.length
-    ? ctx.concepts.join(", ")
-    : "the key concepts relevant to this subject and rubric";
-
-  const systemPrompt =
-    "You are a teaching assistant that grades a student's answer sheet from OCR-extracted text against a rubric and answer key. " +
-    "Respond with ONLY a single JSON object, no markdown fences, no commentary, matching exactly this shape: " +
-    '{"score": number, "maxMarks": number, "gaps": [{"concept": string, "mastery": number, "finding": string, "misconception": string, "evidence": string, "rework": string, "severity": "priority"|"developing"|"secure"}], "feedback": string}. ' +
-    "Determine maxMarks dynamically from the supplied question paper or assessment worksheet: prefer an explicit total, otherwise sum the marks assigned to individual questions. Only fall back to the declared maximum when the paper contains no usable mark evidence. " +
-    "When an answer key is supplied, treat it as the primary grading reference for correctness and expected evidence, while still applying the rubric and reasonable partial credit. " +
-    "mastery is 0-100, based on how well the student's actual answer (from the OCR text) demonstrates each concept. " +
-    "For each gap, diagnose precisely what the child appears to have misunderstood, cite a short paraphrase of the answer-sheet evidence, and state the exact knowledge or skill to rework. Do not invent evidence. " +
-    "Include one gap entry per listed concept, in the same order. Base your grading on the OCR text provided, not assumptions.";
-
-  const userPrompt =
-    `Subject: ${ctx.subject}\n` +
-    `Student: ${ctx.studentName}\n` +
-    `Answer sheet file: ${ctx.fileName}\n` +
-    `Declared maximum marks (fallback only): ${ctx.maxMarks}\n` +
-    `Typed answer key: ${ctx.answerKey || "(none provided)"}\n` +
-    `Rubric: ${ctx.rubric || "(none provided)"}\n` +
-    `Concepts to assess: ${conceptList}\n\n` +
-    `OCR-extracted question paper / assessment worksheet:\n"""\n${ctx.questionPaperText || "(not provided)"}\n"""\n\n` +
-    `OCR-extracted answer key file (PRIMARY REFERENCE when present):\n"""\n${ctx.answerKeyFileText || "(not provided)"}\n"""\n\n` +
-    `OCR-extracted student answer sheet:\n"""\n${ocrText}\n"""\n\n` +
-    "First determine the paper's total marks, then grade the student's answers against the answer key and rubric. Produce the required JSON shape.";
-
-  const startedAt = Date.now();
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "gpt-5.6-sol",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      response_format: { type: "json_object" },
-    }),
-  });
-  const _ms = Date.now() - startedAt;
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`OpenAI analysis failed: ${errText}`);
-  }
-
-  const data = await res.json();
-  const raw = data?.choices?.[0]?.message?.content;
-  if (!raw || typeof raw !== "string") {
-    throw new Error("Empty response from OpenAI");
-  }
-
-  try {
-    return { ...JSON.parse(raw), _ms };
-  } catch {
-    throw new Error("OpenAI did not return valid JSON");
-  }
-}
+Determine maxMarks dynamically from the question paper: prefer an explicit total, otherwise sum question marks, and only then use the declared fallback. Apply reasonable partial credit.
+Return ONLY JSON:
+{"score":number,"maxMarks":number,"gaps":[{"concept":string,"mastery":number,"finding":string,"misconception":string,"evidence":string,"rework":string,"severity":"priority"|"developing"}],"feedback":string}
+Each gap must be genuine and evidence-supported. "evidence" cites question number(s), marks when visible, and a concise paraphrase of the response. "finding" names the smallest teachable gap and error category. "misconception" gives root cause and confidence. "rework" gives prerequisites, sequence, practice mix, mistake-prevention check and measurable mastery standard. Order foundational gaps first.`;
 
 export async function POST(request: Request) {
   try {
     const user = await getAuthenticatedUser(request);
     if (!user) return unauthorized();
-    const body = (await request.json()) as GradeRequestBody;
-    const {
-      subject = "General",
-      studentName = "Student",
-      fileName = "answer sheet",
-      maxMarks = 10,
-      answerKey = "",
-      rubric = "",
-      concepts = [],
-      fileBase64,
-      mimeType = "application/pdf",
-      questionPaperBase64,
-      questionPaperMimeType = "application/pdf",
-      questionPaperName = "",
-      answerKeyBase64,
-      answerKeyMimeType = "application/pdf",
-      answerKeyName = "",
-    } = body;
+    const body = (await request.json()) as GradeRequest;
+    if (!body.ocrText?.trim()) return Response.json({ error: "Validate the answer-sheet OCR text before analysis." }, { status: 400 });
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return Response.json({ error: "OPENAI_API_KEY is not configured." }, { status: 500 });
+    const subject = body.subject?.trim() || "General";
+    const studentName = body.studentName?.trim() || "Student";
+    const fallbackMarks = Number(body.maxMarks) || 10;
+    const userPrompt = `Student: ${studentName}
+Subject: ${subject}
+Answer sheet file: ${body.fileName || "answer sheet"}
+Declared maximum marks (fallback only): ${fallbackMarks}
 
-    const mistralKey = process.env.MISTRAL_API_KEY;
-    if (!mistralKey) {
-      return Response.json(
-        { error: "MISTRAL_API_KEY is not set. Add it to .env.local and restart the dev server." },
-        { status: 500 }
-      );
-    }
-    const openaiKey = process.env.OPENAI_API_KEY;
-    if (!openaiKey) {
-      return Response.json(
-        { error: "OPENAI_API_KEY is not set. Add it to .env.local and restart the dev server." },
-        { status: 500 }
-      );
-    }
-    if (!fileBase64) {
-      return Response.json(
-        { error: "No file data was provided to OCR. Make sure the answer sheet was uploaded and stored before grading." },
-        { status: 400 }
-      );
-    }
+Teacher-validated question paper OCR:
+"""
+${body.questionPaperText?.trim() || "(not supplied)"}
+"""
 
-    // Step 1 — OCR with Mistral (text extraction only)
-    const ocr = await runMistralOCR(fileBase64, mimeType, mistralKey);
-    const questionPaperOcr = questionPaperBase64
-      ? await runMistralOCR(questionPaperBase64, questionPaperMimeType, mistralKey)
-      : { text: "", ms: 0 };
-    const answerKeyOcr = answerKeyBase64
-      ? await runMistralOCR(answerKeyBase64, answerKeyMimeType, mistralKey)
-      : { text: "", ms: 0 };
+Teacher-validated marking scheme/model answer OCR (PRIMARY REFERENCE):
+"""
+${body.answerKeyFileText?.trim() || body.answerKey?.trim() || "(not supplied)"}
+"""
 
-    // Step 2 — Analysis/grading with OpenAI
-    const result = await runOpenAIAnalysis(
-      ocr.text,
-      { subject, studentName, fileName, maxMarks, answerKey, rubric, concepts, questionPaperText: questionPaperOcr.text, answerKeyFileText: answerKeyOcr.text },
-      openaiKey
-    );
+Typed rubric:
+"""
+${body.rubric?.trim() || "(not supplied)"}
+"""
 
-    const { _ms: openaiMs, ...gradePayload } = result;
-    const detectedMaxMarks = Number(gradePayload.maxMarks);
-    if (!Number.isFinite(detectedMaxMarks) || detectedMaxMarks <= 0 || detectedMaxMarks > 10000) {
-      throw new Error("The assessment total marks could not be determined reliably.");
-    }
-    gradePayload.maxMarks = detectedMaxMarks;
-    gradePayload.score = Math.max(0, Math.min(detectedMaxMarks, Number(gradePayload.score) || 0));
+Teacher-validated student answer-sheet OCR:
+"""
+${body.ocrText.trim()}
+"""
+
+Produce the CBSE diagnostic result and exclude fully correct questions from gaps.`;
+    const startedAt = Date.now();
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.6-sol",
+        messages: [{ role: "system", content: CBSE_DIAGNOSTIC_PROMPT }, { role: "user", content: userPrompt }],
+        response_format: { type: "json_object" },
+      }),
+    });
+    const ms = Date.now() - startedAt;
+    if (!response.ok) throw new Error(`OpenAI analysis failed: ${await response.text()}`);
+    const data = await response.json();
+    const raw = data?.choices?.[0]?.message?.content;
+    if (typeof raw !== "string") throw new Error("OpenAI returned no diagnostic analysis.");
+    let result;
+    try { result = JSON.parse(raw); } catch { throw new Error("OpenAI did not return valid diagnostic JSON."); }
+    const maxMarks = Number(result.maxMarks);
+    if (!Number.isFinite(maxMarks) || maxMarks <= 0 || maxMarks > 10000) throw new Error("The assessment total marks could not be determined reliably.");
+    const gaps = (Array.isArray(result.gaps) ? result.gaps : [])
+      .filter((gap: any) => gap && typeof gap.concept === "string" && Number(gap.mastery) < 100)
+      .map((gap: any) => ({ ...gap, mastery: Math.max(0, Math.min(99, Number(gap.mastery) || 0)) }));
     return Response.json({
-      ...gradePayload,
-      ocrText: ocr.text,
-      timing: [
-        { provider: "mistral", ms: ocr.ms + questionPaperOcr.ms + answerKeyOcr.ms, ok: true },
-        { provider: "openai", ms: openaiMs, ok: true },
-      ],
+      score: Math.max(0, Math.min(maxMarks, Number(result.score) || 0)), maxMarks, gaps, feedback: result.feedback,
+      timing: [{ provider: "openai", ms, ok: true }],
       gradingEvidence: {
-        questionPaper: questionPaperName || null,
-        answerKey: answerKeyName || (answerKey ? "Typed answer key" : null),
-        totalMarksSource: questionPaperOcr.text ? "question-paper" : "declared-fallback",
+        questionPaper: body.questionPaperName || null,
+        answerKey: body.answerKeyName || (body.answerKey ? "Typed answer key" : null),
+        totalMarksSource: body.questionPaperText ? "validated-question-paper-ocr" : "declared-fallback",
+        analysisScope: "wrong-partial-unanswered-only",
       },
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unexpected error";
-    return Response.json({ error: message }, { status: 500 });
+    return Response.json({ error: error instanceof Error ? error.message : "Unexpected error" }, { status: 500 });
   }
 }
-import { getAuthenticatedUser, unauthorized } from "../../../lib/supabase-auth";

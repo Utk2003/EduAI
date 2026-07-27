@@ -676,13 +676,16 @@ function PerFileGradeDialog({assessment,file,state,setState,update,open,notify}:
   const [studentName,setStudentName]=useState(()=>guessStudentName(file,state.students));
   const [progress,setProgress]=useState(0);
   const [running,setRunning]=useState(false);
+  const [ocrDocuments,setOcrDocuments]=useState<any>(null);
   const alreadyGraded=Boolean(assessment.gradeResults?.[file.id]);
   const [gradeError,setGradeError]=useState("");
   const grade=async()=>{
     if(!studentName.trim()){notify("Enter the student's name before grading.","warning");return}
-    const evidenceFingerprint=[file.id,qpId,answerKeyId,assessment.answerKey||"",assessment.rubric||"",assessment.subject||""].join("|");
+    const validatedOcr=[ocrDocuments?.answerSheet?.text||"",ocrDocuments?.questionPaper?.text||"",ocrDocuments?.answerKey?.text||""].join("|");
+    let ocrHash=0;for(let i=0;i<validatedOcr.length;i++)ocrHash=((ocrHash<<5)-ocrHash+validatedOcr.charCodeAt(i))|0;
+    const evidenceFingerprint=[file.id,qpId,answerKeyId,assessment.answerKey||"",assessment.rubric||"",assessment.subject||"",ocrHash].join("|");
     const previous:GradeResult|undefined=assessment.gradeResults?.[file.id];
-    if(previous?.evidenceFingerprint===evidenceFingerprint){
+    if(ocrDocuments&&previous?.evidenceFingerprint===evidenceFingerprint){
       notify(`This evidence has not changed. The fixed score and learning gaps for ${previous.studentName} were reused.`);
       open(`student-gaps:${file.id}`);
       return;
@@ -697,6 +700,20 @@ function PerFileGradeDialog({assessment,file,state,setState,update,open,notify}:
       const qpBlob=qpId?await readFileBlob(qpId):null;
       const answerKeyFile=candidates.find(f=>f.id===answerKeyId);
       const answerKeyBlob=answerKeyId?await readFileBlob(answerKeyId):null;
+      if(!ocrDocuments){
+        const documents=[
+          {id:"answerSheet",name:file.name,base64:fileBase64,mimeType:file.type||"application/pdf"},
+          ...(qpBlob?[{id:"questionPaper",name:qp?.name||"Question paper",base64:await blobToBase64(qpBlob),mimeType:qp?.type||"application/pdf"}]:[]),
+          ...(answerKeyBlob?[{id:"answerKey",name:answerKeyFile?.name||"Answer key",base64:await blobToBase64(answerKeyBlob),mimeType:answerKeyFile?.type||"application/pdf"}]:[])
+        ];
+        const ocrResponse=await authFetch("/api/ocr",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({documents})});
+        const ocrPayload=await ocrResponse.json();
+        logApiTiming(setState,ocrPayload?.timing);
+        if(!ocrResponse.ok)throw new Error(ocrPayload?.error||"OCR request failed");
+        clearInterval(timer);setProgress(100);setOcrDocuments(ocrPayload.documents);
+        notify("Mistral OCR is complete. Review and correct the extracted text before validation.");
+        return;
+      }
       const concepts=gapConceptsFor(assessment.subject);
       const res=await authFetch("/api/grade",{
         method:"POST",
@@ -708,14 +725,10 @@ function PerFileGradeDialog({assessment,file,state,setState,update,open,notify}:
           maxMarks:assessment.maxMarks,
           answerKey:assessment.answerKey,
           rubric:assessment.rubric,
-          concepts,
-          fileBase64,
-          mimeType:file.type||"application/pdf",
-          questionPaperBase64:qpBlob?await blobToBase64(qpBlob):undefined,
-          questionPaperMimeType:qp?.type||"application/pdf",
+          ocrText:ocrDocuments.answerSheet?.text,
+          questionPaperText:ocrDocuments.questionPaper?.text,
           questionPaperName:qp?.name,
-          answerKeyBase64:answerKeyBlob?await blobToBase64(answerKeyBlob):undefined,
-          answerKeyMimeType:answerKeyFile?.type||"application/pdf",
+          answerKeyFileText:ocrDocuments.answerKey?.text,
           answerKeyName:answerKeyFile?.name
         })
       });
@@ -726,7 +739,7 @@ function PerFileGradeDialog({assessment,file,state,setState,update,open,notify}:
       const gaps:Gap[]=(payload.gaps||[]).map((g:any)=>({concept:String(g.concept),mastery:Math.max(0,Math.min(100,Math.round(Number(g.mastery)))),finding:String(g.finding||""),misconception:String(g.misconception||""),evidence:String(g.evidence||""),rework:String(g.rework||""),severity:["priority","developing","secure"].includes(g.severity)?g.severity:undefined})).sort((a:Gap,b:Gap)=>a.mastery-b.mastery);
       const detectedMaxMarks=Math.max(1,Math.round(Number(payload.maxMarks)||assessment.maxMarks));
       const score=Math.max(0,Math.min(detectedMaxMarks,Math.round(Number(payload.score))));
-      const result:GradeResult={fileId:file.id,studentName:studentName.trim(),questionPaperFileId:qpId||undefined,questionPaperName:qp?.name,score,maxMarks:detectedMaxMarks,gaps,date:new Date().toISOString(),feedback:typeof payload.feedback==="string"?payload.feedback:undefined,ocrText:typeof payload.ocrText==="string"?payload.ocrText:undefined,evidenceFingerprint};
+      const result:GradeResult={fileId:file.id,studentName:studentName.trim(),questionPaperFileId:qpId||undefined,questionPaperName:qp?.name,score,maxMarks:detectedMaxMarks,gaps,date:new Date().toISOString(),feedback:typeof payload.feedback==="string"?payload.feedback:undefined,ocrText:ocrDocuments.answerSheet?.text,evidenceFingerprint};
       update(assessment.id,{
         maxMarks:detectedMaxMarks,
         gradeResults:{...(assessment.gradeResults||{}),[file.id]:result},
@@ -734,7 +747,7 @@ function PerFileGradeDialog({assessment,file,state,setState,update,open,notify}:
         lastGradedFileId:file.id,
         stage:["draft","uploaded","setup"].includes(assessment.stage)?"review":assessment.stage
       });
-      notify(`${result.studentName}'s answer sheet OCR'd (Mistral) and graded (OpenAI) against ${qp?.name||"the question paper"}. Learning gaps ready.`);
+      notify(`${result.studentName}'s validated OCR was analysed by OpenAI. The report includes only wrong, partial and unanswered questions.`);
       window.setTimeout(()=>open(`student-gaps:${file.id}`),300);
     }catch(err){
       clearInterval(timer);
@@ -745,8 +758,9 @@ function PerFileGradeDialog({assessment,file,state,setState,update,open,notify}:
       setRunning(false);
     }
   };
+  const updateOcr=(id:string,text:string)=>setOcrDocuments((current:any)=>({...current,[id]:{...current[id],text}}));
   return <><DialogHead eyebrow={assessment.title} title={alreadyGraded?"Regrade answer sheet":"Grade answer sheet"}/>
-    <p className="modal-copy">Confirm the student, the answer sheet and the question paper to grade against. Marks remain a draft until a teacher reviews them.</p>
+    <p className="modal-copy">First extract text with Mistral. Review and correct it on screen. OpenAI will not analyse the answers until you validate the OCR text.</p>
     <Field label="Answer sheet"><input value={file.name} disabled/></Field>
     <Field label="Student name"><input value={studentName} onChange={e=>setStudentName(e.target.value)} required/></Field>
     <Field label="Grade against question paper">
@@ -762,9 +776,10 @@ function PerFileGradeDialog({assessment,file,state,setState,update,open,notify}:
       </select>
     </Field>
     {!candidates.length&&<p className="form-error">Upload the question paper alongside this answer sheet for the most accurate grading.</p>}
-    {progress>0&&<><Progress value={progress}/><p className="modal-copy">{running?`Grading with Mistral: ${progress}%`:"Grading complete"}</p></>}
+    {ocrDocuments&&<section className="ocr-validation"><header><div><p className="eyebrow">OCR validation</p><h3>Check the extracted text</h3></div><span className="status warning">Teacher validation required</span></header><p>Correct names, question numbers, marks, formulas or unreadable words before continuing.</p><label><b>Student answer sheet · {ocrDocuments.answerSheet?.name}</b><textarea value={ocrDocuments.answerSheet?.text||""} onChange={e=>updateOcr("answerSheet",e.target.value)} rows={12}/></label>{ocrDocuments.questionPaper&&<label><b>Question paper · {ocrDocuments.questionPaper.name}</b><textarea value={ocrDocuments.questionPaper.text} onChange={e=>updateOcr("questionPaper",e.target.value)} rows={8}/></label>}{ocrDocuments.answerKey&&<label><b>Model answer / marking scheme · {ocrDocuments.answerKey.name}</b><textarea value={ocrDocuments.answerKey.text} onChange={e=>updateOcr("answerKey",e.target.value)} rows={8}/></label>}</section>}
+    {progress>0&&<><Progress value={progress}/><p className="modal-copy">{running?(ocrDocuments?`OpenAI diagnostic analysis: ${progress}%`:`Mistral OCR: ${progress}%`):ocrDocuments?"OCR complete · awaiting teacher validation":"Ready"}</p></>}
     {gradeError&&<p className="form-error" role="alert">{gradeError}</p>}
-    <button className="primary full" disabled={running} onClick={grade}>{running?`Analysing ${studentName||"answer sheet"}…`:alreadyGraded?"Reanalyse unchanged evidence":"Analyse this answer sheet"}</button>
+    <button className="primary full" disabled={running} onClick={grade}>{running?(ocrDocuments?"Analysing validated text with OpenAI…":"Extracting text with Mistral…"):ocrDocuments?"Validate OCR text & generate learning-gap report":"Extract OCR text with Mistral"}</button>
   </>
 }
 
@@ -773,6 +788,7 @@ function StudentGapsDialog({assessment,fileId,open}:any){
   const file=(assessment.files||[]).find((f:UploadFile)=>f.id===fileId);
   if(!result)return <><DialogHead eyebrow={assessment.title} title="Learning gaps report"/><p className="modal-copy">This answer sheet has not been graded yet. Grade it first to unlock its learning gaps report.</p><button className="primary full" onClick={()=>open(`grade-file:${fileId}`)}>Grade this answer sheet</button></>;
   const sorted=result.gaps.slice().sort((a,b)=>a.mastery-b.mastery);
+  if(!sorted.length)return <><DialogHead eyebrow={`${result.studentName} · ${file?.name||"Answer sheet"}`} title="Learning gaps report"/><div className="empty-state"><b>No evidence-supported learning gaps found</b><p>OpenAI found no wrong, partially correct, incomplete or unanswered responses in the teacher-validated OCR text. Review the score and OCR evidence before approval.</p></div><button className="secondary full" onClick={()=>open(`grade-file:${fileId}`)}>Review validated OCR</button></>;
   const priority=sorted[0];
   return <><DialogHead eyebrow={`${result.studentName} · ${file?.name||"Answer sheet"}`} title="Learning gaps report"/>
     <div className="xray-summary">
