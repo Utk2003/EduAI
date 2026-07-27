@@ -84,6 +84,18 @@ test("teacher explicitly chooses grading or learning-gap analysis", () => {
   assert.match(app, /type="radio"/);
 });
 
+test("demo access starts logged out and covers every role", () => {
+  for (const role of ["Teacher demo", "Principal demo", "School admin demo", "Super admin demo"]) {
+    assert.ok(app.includes(role), `missing demo login: ${role}`);
+  }
+  for (const capability of ["Choose a demo login", "Create a new teacher account", "Create account & add new work", "Switch account"]) {
+    assert.ok(app.includes(capability), `missing demo access behavior: ${capability}`);
+  }
+  assert.match(app, /if\(!profile\)return <DemoAccess/);
+  assert.match(app, /setDialog\("create-assessment"\)/);
+  assert.match(app, /assessments:\[\]/);
+});
+
 test("Mistral OCR evidence drives OpenAI learning resources", () => {
   const grade = readFileSync(new URL("../app/api/grade/route.ts", import.meta.url), "utf8");
   const worksheet = readFileSync(new URL("../app/api/generate-worksheet/route.ts", import.meta.url), "utf8");

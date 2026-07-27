@@ -16,6 +16,7 @@ type Assessment = {
 };
 type UploadFile = {id:string;name:string;type:string;size:number;progress:number;status:string;preview?:string};
 type User = {id:string;name:string;email:string;role:string;school:string;phone:string;status:"Active"|"Inactive"|"Invited"};
+type DemoProfile = {id:string;name:string;email:string;role:Role;school:string;label:string};
 type Intervention = {id:string;assessmentId:string;concept:string;format:string;duration:string;status:string;followup:string;followupRecorded?:boolean;followupEvidence?:{studentsCompleted:number;avgMastery:number;outcome:string;note:string}};
 type CognitiveLevel = "recall" | "application" | "analysis";
 type WorksheetContent = {
@@ -48,8 +49,26 @@ const initialState:DemoState = {
 
 const stageLabel:Record<Stage,string>={draft:"Draft",uploaded:"Uploaded",setup:"Rubric setup",grading:"AI grading",review:"Teacher review",approved:"Approved",xray:"X-Ray ready",intervention:"Intervention",followup:"Follow-up",published:"Published"};
 const teacherNav:TeacherModule[]=["Home","Work","Review","X-Ray","Interventions","Students","Resources","Achievements","Reports","Settings"];
+const demoAccounts:DemoProfile[]=[
+  {id:"demo-teacher",name:"Asha Sharma",email:"asha@sunrise.demo",role:"Teacher",school:"Sunrise Academy",label:"Teacher demo"},
+  {id:"demo-principal",name:"Rohan Mehta",email:"principal@sunrise.demo",role:"Principal",school:"Sunrise Academy",label:"Principal demo"},
+  {id:"demo-school-admin",name:"Meera Iyer",email:"admin@sunrise.demo",role:"School admin",school:"Sunrise Academy",label:"School admin demo"},
+  {id:"demo-platform-admin",name:"Dev Malhotra",email:"platform@eduai.demo",role:"Platform admin",school:"EduAI Platform",label:"Super admin demo"},
+];
 
 function cloneInitial(){return JSON.parse(JSON.stringify(initialState)) as DemoState}
+function newTeacherState(profile:DemoProfile):DemoState{
+  const state=cloneInitial();
+  return {
+    ...state,
+    assessments:[],
+    interventions:[],
+    resources:[],
+    events:[`Teacher demo account created · ${profile.name}`],
+    users:[{id:profile.id,name:profile.name,email:profile.email,role:"Teacher",school:profile.school,phone:"",status:"Active"}],
+    schools:[`${profile.school} · Demo workspace`],
+  };
+}
 function logApiTiming(setState:(fn:(s:DemoState)=>DemoState)=>void,timing?:{provider:"mistral"|"openai";ms:number;ok:boolean}[]){
   if(!timing||!timing.length)return;
   setState(s=>({...s,apiLog:[...timing.map(t=>({...t,ts:Date.now()})),...(s.apiLog||[])].slice(0,200)}));
@@ -103,6 +122,7 @@ function masteryTrend(state:DemoState):{label:string;value:number}[]{
 }
 
 export default function FunctionalEduAIApp(){
+  const [profile,setProfile]=useState<DemoProfile|null>(null);
   const [role,setRole]=useState<Role>("Teacher");
   const [module,setModule]=useState<TeacherModule|AdminModule>("Home");
   const [state,setState]=useState<DemoState>(cloneInitial);
@@ -121,34 +141,53 @@ export default function FunctionalEduAIApp(){
   const updateAssessment=(id:string,patch:Partial<Assessment>)=>setState(s=>({...s,assessments:s.assessments.map(a=>a.id===id?{...a,...patch}:a),events:[`${new Date().toLocaleTimeString()} · ${patch.stage?stageLabel[patch.stage]:"Assessment updated"}`,...s.events].slice(0,20)}));
   const openAssessment=(id:string,next:TeacherModule="Work")=>{setSelectedId(id);setModule(next)};
   const resetDemo=()=>{setState(cloneInitial());setSelectedId("a1");notify("Demo data restored")};
+  const signInDemo=(account:DemoProfile)=>{
+    setProfile(account);
+    setRole(account.role);
+    setState(cloneInitial());
+    setSelectedId("a1");
+    setModule(account.role==="Teacher"?"Home":"Overview");
+  };
+  const createTeacherAccount=(account:DemoProfile)=>{
+    setProfile(account);
+    setRole("Teacher");
+    setState(newTeacherState(account));
+    setSelectedId("");
+    setModule("Work");
+    setDialog("create-assessment");
+  };
+  const signOutDemo=()=>{setProfile(null);setDialog(null);setToast(null);setRole("Teacher");setModule("Home")};
 
   useEffect(()=>{setModule(role==="Teacher"?"Home":"Overview")},[role]);
   if(!ready)return <div className="app-loading"><img src="/brand/logo.png" alt="EduAI Hub"/><b>Preparing your workspace…</b></div>;
+  if(!profile)return <DemoAccess accounts={demoAccounts} signIn={signInDemo} createTeacher={createTeacherAccount}/>;
 
   const nav=role==="Teacher"?teacherNav:role==="School admin"?["Overview","Users","Schools & Classes","Students","Academic years","Branding & Privacy","Reports"] as AdminModule[]:role==="Platform admin"?["Overview","Schools","Users","Analytics","AI Configuration","Feature flags","System health","Audit"] as AdminModule[]:["Overview","Reports"] as AdminModule[];
+  const initials=profile.name.split(/\s+/).map(x=>x[0]).join("").slice(0,2).toUpperCase();
   return <div className="app-shell functional-shell">
     <aside className="sidebar">
       <button className="brand" onClick={()=>setModule(role==="Teacher"?"Home":"Overview")}><img src="/brand/shield.png" alt=""/><span><b>Learning X-Ray</b><small>by EduAI Hub</small></span></button>
       <nav aria-label="Primary navigation">{nav.map(item=><button key={item} className={module===item?"active":""} onClick={()=>setModule(item)}><span className="nav-icon">{icon(item)}</span><span>{item}</span>{item==="Review"&&<em>{state.assessments.reduce((n,a)=>n+Math.max(0,a.totalReviews-a.reviewed),0)}</em>}</button>)}</nav>
       <div className="sidebar-foot">
         <button className="secondary full" onClick={()=>setDialog("activity")}>Activity & audit</button>
-        <button className="profile" onClick={()=>setDialog("profile")}><span>AS</span><div><b>Asha Sharma</b><small>Sunrise Academy</small></div><i>•••</i></button>
+        <button className="profile" onClick={()=>setDialog("profile")}><span>{initials}</span><div><b>{profile.name}</b><small>{profile.school}</small></div><i>•••</i></button>
       </div>
     </aside>
     <main>
       <header className="topbar">
         <div className="mobile-brand"><img src="/brand/shield.png" alt=""/><b>Learning X-Ray</b></div>
-        <div className="crumb"><span>Sunrise Academy</span><i>›</i><b>{role} workspace</b></div>
+        <div className="crumb"><span>{profile.school}</span><i>›</i><b>{role} workspace</b></div>
         <div className="top-actions">
           <span className={`sync-indicator ${syncStatus.toLowerCase()}`}>{syncStatus==="Synced"?"● Cloud synced":syncStatus==="Syncing"?"◌ Saving…":syncStatus==="Offline"?"○ Offline · queued":"◌ Loading…"}</span>
-          <select aria-label="Switch demo role" value={role} onChange={e=>setRole(e.target.value as Role)}>{(["Teacher","Principal","School admin","Platform admin"] as Role[]).map(x=><option key={x}>{x}</option>)}</select>
+          <span className="demo-role-badge">{profile.label}</span>
+          <button className="demo-signout" onClick={signOutDemo}>Switch account</button>
           <button aria-label="Toggle appearance" onClick={()=>setDark(x=>!x)}>{dark?"☀":"☾"}</button>
           <button aria-label="Notifications" onClick={()=>setDialog("notifications")}>♢{state.events.length>0&&<em>{Math.min(9,state.events.length)}</em>}</button>
         </div>
       </header>
       <div className="content">
         {role==="Teacher"
-          ? <TeacherApp module={module as TeacherModule} state={state} selected={selected} openAssessment={openAssessment} open={setDialog} notify={notify} update={updateAssessment} setState={setState}/>
+          ? <TeacherApp profile={profile} module={module as TeacherModule} state={state} selected={selected} openAssessment={openAssessment} open={setDialog} notify={notify} update={updateAssessment} setState={setState}/>
           : role==="School admin"
             ? <SchoolAdminApp module={module as AdminModule} state={state} setState={setState} open={setDialog} notify={notify}/>
             : role==="Principal"
@@ -163,8 +202,49 @@ export default function FunctionalEduAIApp(){
   </div>
 }
 
-function TeacherApp({module,state,selected,openAssessment,open,notify,update,setState}:any){
-  if(module==="Home")return <TeacherHome state={state} openAssessment={openAssessment} open={open}/>;
+function DemoAccess({accounts,signIn,createTeacher}:{accounts:DemoProfile[];signIn:(account:DemoProfile)=>void;createTeacher:(account:DemoProfile)=>void}){
+  const [creating,setCreating]=useState(false);
+  const submit=(event:FormEvent<HTMLFormElement>)=>{
+    event.preventDefault();
+    const data=new FormData(event.currentTarget);
+    const name=String(data.get("name")||"").trim();
+    const email=String(data.get("email")||"").trim().toLowerCase();
+    const school=String(data.get("school")||"").trim();
+    createTeacher({id:`teacher-${Date.now()}`,name,email,role:"Teacher",school,label:"New teacher demo"});
+  };
+  return <main className="demo-auth">
+    <section className="demo-auth-story">
+      <img src="/brand/logo.png" alt="EduAI Hub"/>
+      <p className="eyebrow">EduAI Learning X-Ray · Demo access</p>
+      <h1>See each role clearly. Start with the teacher journey.</h1>
+      <p>Every account opens role-specific sample data. Create a fresh teacher account to begin with an empty workspace and add your first piece of work.</p>
+      <ol><li><b>1</b><span>Create a teacher account</span></li><li><b>2</b><span>Add new work</span></li><li><b>3</b><span>Upload, grade and diagnose gaps</span></li></ol>
+      <div className="demo-warning"><b>Demo environment</b><span>These accounts are for product demonstration only and are not production authentication.</span></div>
+    </section>
+    <section className="demo-auth-panel">
+      <div className="demo-auth-card">
+        <p className="eyebrow">Start here</p>
+        <h2>{creating?"Create your teacher demo":"Choose a demo login"}</h2>
+        <p>{creating?"Your new workspace starts empty and opens the Create assessment flow immediately.":"Use the teacher journey first, or inspect another role with seeded demo data."}</p>
+        {creating?<form onSubmit={submit}>
+          <label>Teacher name<input name="name" required autoFocus placeholder="e.g. Neha Verma"/></label>
+          <label>Work email<input name="email" type="email" required placeholder="neha@school.edu"/></label>
+          <label>School name<input name="school" required placeholder="e.g. Greenfield School"/></label>
+          <button className="primary full" type="submit">Create account & add new work</button>
+          <button className="secondary full" type="button" onClick={()=>setCreating(false)}>Back to demo accounts</button>
+        </form>:<>
+          <button data-testid="create-teacher-account" className="teacher-start" onClick={()=>setCreating(true)}><span>＋</span><div><b>Create a new teacher account</b><small>Empty workspace · opens new work</small></div><i>→</i></button>
+          <div className="demo-divider"><span>Or sign in with demo data</span></div>
+          <div className="demo-account-list">{accounts.map(account=><button key={account.id} data-testid={`demo-login-${account.role.toLowerCase().replaceAll(" ","-")}`} onClick={()=>signIn(account)}><span>{account.name.split(/\s+/).map(x=>x[0]).join("").slice(0,2)}</span><div><b>{account.label}</b><small>{account.name} · {account.school}</small></div><i>→</i></button>)}</div>
+        </>}
+        <footer><a href="/privacy">Privacy</a><a href="/terms">Terms</a><span>Demo data · No rankings</span></footer>
+      </div>
+    </section>
+  </main>;
+}
+
+function TeacherApp({profile,module,state,selected,openAssessment,open,notify,update,setState}:any){
+  if(module==="Home")return <TeacherHome profile={profile} state={state} openAssessment={openAssessment} open={open}/>;
   if(module==="Work")return <Work state={state} selected={selected} openAssessment={openAssessment} open={open} update={update} notify={notify}/>;
   if(module==="Review")return <Review selected={selected} update={update} notify={notify} open={open}/>;
   if(module==="X-Ray")return <XRay selected={selected} open={open} notify={notify}/>;
@@ -176,13 +256,13 @@ function TeacherApp({module,state,selected,openAssessment,open,notify,update,set
   return <Reports state={state} open={open} notify={notify}/>;
 }
 
-function TeacherHome({state,openAssessment,open}:any){
+function TeacherHome({profile,state,openAssessment,open}:any){
   const pending=state.assessments.reduce((n:any,a:any)=>n+Math.max(0,a.totalReviews-a.reviewed),0);
   const concepts=conceptMastery(state);
   const priorityConcepts=concepts.filter(c=>c.mastery<70);
   const today=new Date().toISOString().slice(0,10);
   const followupsDue=state.interventions.filter((i:Intervention)=>i.status!=="Completed"&&i.followup&&i.followup<=today).length;
-  return <><PageHead eyebrow="Teacher workspace" title="Good morning, Asha." subtitle="Follow the clearest path from evidence to action."><button className="primary" onClick={()=>open("create-assessment")}>＋ Create assessment</button><button className="secondary" onClick={()=>open("upload")}>↑ Upload work</button></PageHead>
+  return <><PageHead eyebrow="Teacher workspace" title={`Good morning, ${String(profile?.name||"Teacher").split(" ")[0]}.`} subtitle="Follow the clearest path from evidence to action."><button className="primary" onClick={()=>open("create-assessment")}>＋ Create assessment</button><button className="secondary" onClick={()=>open("upload")}>↑ Upload work</button></PageHead>
     <section className="metric-grid five"><Metric label="Assessments" value={state.assessments.length} note="Persisted securely"/><Metric label="Answers to review" value={pending} note="Teacher judgement"/><Metric label="Priority gaps" value={String(priorityConcepts.length)} note={concepts.length?`Across ${concepts.length} concept${concepts.length===1?"":"s"} with evidence`:"No graded evidence yet"}/><Metric label="Interventions" value={state.interventions.length} note="Active cycles"/><Metric label="Follow-ups due" value={String(followupsDue)} note="Overdue or due today"/></section>
     <div className="dashboard-grid"><section className="card span-2"><CardHead title="Continue your work" eyebrow="Assessment pipeline"><button className="link" onClick={()=>open("create-assessment")}>New assessment →</button></CardHead>
       <div className="table"><div className="tr th"><span>Assessment</span><span>Progress</span><span>Next step</span><span>Status</span></div>{state.assessments.map((a:any)=><button className="tr row-button" key={a.id} onClick={()=>openAssessment(a.id,"Work")}><span><b>{a.title}</b><small>Grade {a.grade}{a.section} · {a.subject}</small></span><span>{a.reviewed}/{a.totalReviews||0}</span><span>{nextAction(a.stage)}</span><span><b>{stageLabel[a.stage as Stage]}</b></span></button>)}</div>
