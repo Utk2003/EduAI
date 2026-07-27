@@ -71,7 +71,7 @@ async function runOpenAIAnalysis(
     answerKeyFileText: string;
   },
   apiKey: string
-): Promise<{ score: number; maxMarks: number; gaps: { concept: string; mastery: number }[]; feedback: string; _ms: number }> {
+): Promise<{ score: number; maxMarks: number; gaps: { concept: string; mastery: number; finding:string; misconception:string; evidence:string; rework:string; severity:"priority"|"developing"|"secure" }[]; feedback: string; _ms: number }> {
   const conceptList = ctx.concepts.length
     ? ctx.concepts.join(", ")
     : "the key concepts relevant to this subject and rubric";
@@ -79,10 +79,11 @@ async function runOpenAIAnalysis(
   const systemPrompt =
     "You are a teaching assistant that grades a student's answer sheet from OCR-extracted text against a rubric and answer key. " +
     "Respond with ONLY a single JSON object, no markdown fences, no commentary, matching exactly this shape: " +
-    '{"score": number, "maxMarks": number, "gaps": [{"concept": string, "mastery": number}], "feedback": string}. ' +
+    '{"score": number, "maxMarks": number, "gaps": [{"concept": string, "mastery": number, "finding": string, "misconception": string, "evidence": string, "rework": string, "severity": "priority"|"developing"|"secure"}], "feedback": string}. ' +
     "Determine maxMarks dynamically from the supplied question paper or assessment worksheet: prefer an explicit total, otherwise sum the marks assigned to individual questions. Only fall back to the declared maximum when the paper contains no usable mark evidence. " +
     "When an answer key is supplied, treat it as the primary grading reference for correctness and expected evidence, while still applying the rubric and reasonable partial credit. " +
     "mastery is 0-100, based on how well the student's actual answer (from the OCR text) demonstrates each concept. " +
+    "For each gap, diagnose precisely what the child appears to have misunderstood, cite a short paraphrase of the answer-sheet evidence, and state the exact knowledge or skill to rework. Do not invent evidence. " +
     "Include one gap entry per listed concept, in the same order. Base your grading on the OCR text provided, not assumptions.";
 
   const userPrompt =

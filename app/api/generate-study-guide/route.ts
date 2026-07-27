@@ -6,16 +6,22 @@ type StudyGuideRequest = {
   feedback?: string;
   ocrText?: string;
   evidenceFiles?: string[];
+  gaps?: {concept:string;mastery:number;finding?:string;misconception?:string;evidence?:string;rework?:string}[];
 };
 
 type StudyGuide = {
   title: string;
-  objective: string;
-  explanation: string;
-  workedExample: string;
-  misconception: string;
-  practiceSteps: string[];
-  checkForUnderstanding: string[];
+  overview: string;
+  topics: {
+    concept:string;
+    mastery:number;
+    diagnosis:string;
+    learningObjective:string;
+    explanation:string;
+    workedExample:string;
+    practiceSteps:string[];
+    checkForUnderstanding:string[];
+  }[];
 };
 
 export async function POST(request: Request) {
@@ -24,7 +30,8 @@ export async function POST(request: Request) {
     if (!user) return unauthorized();
     const body = (await request.json()) as StudyGuideRequest;
     const subject = body.subject?.trim() || "General";
-    const concept = body.concept?.trim() || "the identified learning gap";
+    const concept = body.concept?.trim() || "the identified learning gaps";
+    const gaps=(body.gaps||[]).sort((a,b)=>a.mastery-b.mastery);
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) return Response.json({ error: "OPENAI_API_KEY is not configured." }, { status: 500 });
 
@@ -33,7 +40,8 @@ export async function POST(request: Request) {
       `Mastery: ${body.mastery ?? "unknown"}%\nGrading feedback: ${body.feedback || "No additional feedback"}\n` +
       `Answer-sheet OCR evidence:\n${(body.ocrText || "").slice(0, 12000) || "No OCR excerpt available"}\n\n` +
       `Uploaded source set:\n${(body.evidenceFiles || []).join("\n") || "No source filenames supplied"}\n\n` +
-      "Create a concise, editable study guide grounded in this evidence. Keep every example and question within the stated subject. " +
+      `All diagnosed learning gaps, in priority order:\n${gaps.map((gap,index)=>`${index+1}. ${gap.concept} (${gap.mastery}% mastery)\nFinding: ${gap.finding||""}\nMisconception: ${gap.misconception||""}\nEvidence: ${gap.evidence||""}\nRework: ${gap.rework||""}`).join("\n\n")||concept}\n\n` +
+      "Create a complete, editable study guide with one topic section for EVERY listed gap. Preserve the priority order and ground each explanation, example and activity in its diagnostic finding. Keep every example and question within the stated subject. " +
       "Do not introduce mathematics examples unless the subject or evidence is mathematical.";
 
     const startedAt = Date.now();
@@ -47,8 +55,8 @@ export async function POST(request: Request) {
             role: "system",
             content:
               "You create evidence-based remedial study guides for teachers. Return only JSON with this exact shape: " +
-              '{"title":string,"objective":string,"explanation":string,"workedExample":string,"misconception":string,' +
-              '"practiceSteps":[string,string,string],"checkForUnderstanding":[string,string,string]}.',
+              '{"title":string,"overview":string,"topics":[{"concept":string,"mastery":number,"diagnosis":string,"learningObjective":string,"explanation":string,"workedExample":string,' +
+              '"practiceSteps":[string,string,string],"checkForUnderstanding":[string,string,string]}]}. Include exactly one topic object for every supplied learning gap.',
           },
           { role: "user", content: prompt },
         ],

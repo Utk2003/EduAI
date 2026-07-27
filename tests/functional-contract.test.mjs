@@ -122,3 +122,14 @@ test("Mistral OCR evidence drives OpenAI learning resources", () => {
   assert.match(studyGuide, /Do not introduce mathematics examples/);
   assert.match(app, /authFetch\("\/api\/generate-study-guide"/);
 });
+
+test("reanalysis is stable and every diagnosed gap becomes a study-guide topic", () => {
+  const grade = readFileSync(new URL("../app/api/grade/route.ts", import.meta.url), "utf8");
+  const studyGuide = readFileSync(new URL("../app/api/generate-study-guide/route.ts", import.meta.url), "utf8");
+  for (const behavior of ["evidenceFingerprint", "fixed score and learning gaps", "Diagnostic finding", "Likely misunderstanding", "Evidence from the answer", "What the child needs to rework", "guide-topic-index", "guide-topic-sections"]) {
+    assert.ok(app.includes(behavior), `missing stable diagnostic behavior: ${behavior}`);
+  }
+  for (const field of ["misconception", "evidence", "rework"]) assert.ok(grade.includes(field), `missing diagnostic field: ${field}`);
+  assert.match(studyGuide, /one topic section for EVERY listed gap/);
+  assert.match(studyGuide, /topics: \{/);
+});

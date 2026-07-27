@@ -7,8 +7,8 @@ type Role = "Teacher" | "Principal" | "School admin" | "Platform admin";
 type TeacherModule = "Home" | "Work" | "Review" | "X-Ray" | "Interventions" | "Students" | "Resources" | "Achievements" | "Reports" | "Settings";
 type AdminModule = "Overview" | "Users" | "Schools & Classes" | "Students" | "Academic years" | "Branding & Privacy" | "Schools" | "Analytics" | "AI Configuration" | "Feature flags" | "System health" | "Audit" | "Reports";
 type Stage = "draft" | "uploaded" | "setup" | "grading" | "review" | "approved" | "xray" | "intervention" | "followup" | "published";
-type Gap = {concept:string; mastery:number};
-type GradeResult = {fileId:string; studentName:string; questionPaperFileId?:string; questionPaperName?:string; score:number; maxMarks:number; gaps:Gap[]; date:string; feedback?:string; ocrText?:string};
+type Gap = {concept:string; mastery:number;finding?:string;misconception?:string;evidence?:string;rework?:string;severity?:"priority"|"developing"|"secure"};
+type GradeResult = {fileId:string; studentName:string; questionPaperFileId?:string; questionPaperName?:string; score:number; maxMarks:number; gaps:Gap[]; date:string; feedback?:string; ocrText?:string;evidenceFingerprint?:string};
 type Assessment = {
   id:string; title:string; type:string; grade:string; section:string; subject:string;
   maxMarks:number; date:string; stage:Stage; files:UploadFile[]; questions:number;
@@ -643,29 +643,18 @@ function StudyGuideDialog({assessment,fileId,open,done}:any){
   const generate=async()=>{
     setGenerating(true);setError("");
     try{
-      const response=await authFetch("/api/generate-study-guide",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subject:assessment.subject,concept,studentName:result?.studentName,mastery:gap.mastery,feedback:result?.feedback,ocrText:result?.ocrText,evidenceFiles:assessment.files.map((file:UploadFile)=>`${file.documentRole||inferDocumentRole(file.name)}: ${file.name}`)})});
+      const response=await authFetch("/api/generate-study-guide",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subject:assessment.subject,concept,studentName:result?.studentName,mastery:gap.mastery,gaps:result?.gaps,feedback:result?.feedback,ocrText:result?.ocrText,evidenceFiles:assessment.files.map((file:UploadFile)=>`${file.documentRole||inferDocumentRole(file.name)}: ${file.name}`)})});
       const payload=await response.json();
       if(!response.ok)throw new Error(payload?.error||"Study-guide generation failed");
       setGuide(payload.guide);
     }catch(err){setError(err instanceof Error?err.message:"Study-guide generation failed")}finally{setGenerating(false)}
   };
-  const download=()=>downloadText(`${concept.replace(/[^a-z0-9]+/gi,"-")}-Study-Guide.txt`,[
-    guide.title,`Subject: ${assessment.subject}`,`Student: ${result?.studentName||"Student"}`,`Learning gap: ${concept}`,
-    `Objective\n${guide.objective}`,`Explanation\n${guide.explanation}`,`Worked example\n${guide.workedExample}`,
-    `Misconception to correct\n${guide.misconception}`,`Practice steps\n${guide.practiceSteps.map((x:string,i:number)=>`${i+1}. ${x}`).join("\n")}`,
-    `Check for understanding\n${guide.checkForUnderstanding.map((x:string,i:number)=>`${i+1}. ${x}`).join("\n")}`
-  ].join("\n\n"));
-  return <><DialogHead eyebrow={`${result?`${result.studentName} · `:""}Learning gap · ${assessment.title}`} title="Targeted study guide"/>
-    <p className="modal-copy">Priority gap identified from this {assessment.subject} answer sheet: <b>{concept}</b> ({gap.mastery}% mastery). OpenAI will ground the guide in the OCR evidence and grading feedback.</p>
+  const download=()=>downloadText(`${String(guide.title||"Study-Guide").replace(/[^a-z0-9]+/gi,"-")}.txt`,[guide.title,`Subject: ${assessment.subject}`,`Student: ${result?.studentName||"Student"}`,guide.overview,...(guide.topics||[]).map((topic:any,index:number)=>[`TOPIC ${index+1}: ${topic.concept} (${topic.mastery}% mastery)`,`Diagnosis\n${topic.diagnosis}`,`Learning objective\n${topic.learningObjective}`,`Explanation\n${topic.explanation}`,`Worked example\n${topic.workedExample}`,`Practice\n${topic.practiceSteps.map((x:string,i:number)=>`${i+1}. ${x}`).join("\n")}`,`Check for understanding\n${topic.checkForUnderstanding.map((x:string,i:number)=>`${i+1}. ${x}`).join("\n")}`].join("\n\n"))].join("\n\n"));
+  return <><DialogHead eyebrow={`${result?`${result.studentName} · `:""}Learning recovery plan · ${assessment.title}`} title="Complete study guide"/>
+    <p className="modal-copy">This guide covers all <b>{result?.gaps.length||1} diagnosed learning gap{result?.gaps.length===1?"":"s"}</b>, beginning with the weakest topic. Every section is grounded in the uploaded evidence and diagnostic findings.</p>
     {!guide&&<button className="secondary full" disabled={generating} onClick={generate}>{generating?"Generating evidence-based guide…":"Generate editable study guide with OpenAI"}</button>}
     {error&&<p className="form-error" role="alert">{error}</p>}
-    {guide&&<><div className="branded-document"><BrandDocumentHeader label="Personalised study guide" title={guide.title} meta={`${assessment.subject} · ${result?.studentName||"Student"} · Priority: ${concept}`}/><div className="source-ribbon"><b>Built from</b>{assessment.files.map((file:UploadFile)=><span key={file.id}>{file.documentRole||inferDocumentRole(file.name)} · {file.name}</span>)}</div><div className="study-plan">
-      <article><b>Objective</b><p>{guide.objective}</p></article>
-      <article><b>Explain the idea</b><p>{guide.explanation}</p></article>
-      <article><b>Worked example</b><p>{guide.workedExample}</p></article>
-      <article><b>Misconception to correct</b><p>{guide.misconception}</p></article>
-      {(guide.practiceSteps||[]).map((step:string,i:number)=><article key={i}><b>Practice {i+1}</b><p>{step}</p></article>)}
-    </div></div>
+    {guide&&<><div className="branded-document study-guide-view"><BrandDocumentHeader label="Personalised study guide" title={guide.title} meta={`${assessment.subject} · ${result?.studentName||"Student"} · ${guide.topics?.length||0} topic plan`}/><p className="guide-overview">{guide.overview}</p><nav className="guide-topic-index" aria-label="Study guide topics">{(guide.topics||[]).map((topic:any,index:number)=><span key={topic.concept}><b>{index+1}</b>{topic.concept}<small>{topic.mastery}% starting mastery</small></span>)}</nav><div className="source-ribbon"><b>Built from</b>{assessment.files.map((file:UploadFile)=><span key={file.id}>{file.documentRole||inferDocumentRole(file.name)} · {file.name}</span>)}</div><div className="guide-topic-sections">{(guide.topics||[]).map((topic:any,index:number)=><section key={topic.concept}><header><span>Topic {index+1}</span><h3>{topic.concept}</h3><b>{topic.mastery}%</b></header><div className="diagnosis-callout"><b>Why this is a learning gap</b><p>{topic.diagnosis}</p></div><div className="guide-learning-grid"><article><b>Learning objective</b><p>{topic.learningObjective}</p></article><article><b>Clear explanation</b><p>{topic.explanation}</p></article><article className="span-2"><b>Worked example</b><p>{topic.workedExample}</p></article><article><b>Guided practice</b><ol>{(topic.practiceSteps||[]).map((step:string,i:number)=><li key={i}>{step}</li>)}</ol></article><article><b>Check for understanding</b><ol>{(topic.checkForUnderstanding||[]).map((step:string,i:number)=><li key={i}>{step}</li>)}</ol></article></div></section>)}</div></div>
     <Field label="Teacher instructions"><textarea defaultValue={`Use this ${assessment.subject} guide to address ${concept}. Ask the student to explain the evidence behind each response.`}/></Field>
     <div className="button-row">
       <button className="secondary" onClick={download}>Download study guide</button>
@@ -691,6 +680,13 @@ function PerFileGradeDialog({assessment,file,state,setState,update,open,notify}:
   const [gradeError,setGradeError]=useState("");
   const grade=async()=>{
     if(!studentName.trim()){notify("Enter the student's name before grading.","warning");return}
+    const evidenceFingerprint=[file.id,qpId,answerKeyId,assessment.answerKey||"",assessment.rubric||"",assessment.subject||""].join("|");
+    const previous:GradeResult|undefined=assessment.gradeResults?.[file.id];
+    if(previous?.evidenceFingerprint===evidenceFingerprint){
+      notify(`This evidence has not changed. The fixed score and learning gaps for ${previous.studentName} were reused.`);
+      open(`student-gaps:${file.id}`);
+      return;
+    }
     setGradeError("");setRunning(true);let p=0;
     const timer=window.setInterval(()=>{p=Math.min(90,p+15);setProgress(p)},180);
     try{
@@ -727,10 +723,10 @@ function PerFileGradeDialog({assessment,file,state,setState,update,open,notify}:
       logApiTiming(setState,payload?.timing);
       if(!res.ok)throw new Error(payload?.error||"Grading request failed");
       clearInterval(timer);setProgress(100);
-      const gaps:Gap[]=(payload.gaps||[]).map((g:any)=>({concept:String(g.concept),mastery:Math.max(0,Math.min(100,Math.round(Number(g.mastery))))})).sort((a:Gap,b:Gap)=>a.mastery-b.mastery);
+      const gaps:Gap[]=(payload.gaps||[]).map((g:any)=>({concept:String(g.concept),mastery:Math.max(0,Math.min(100,Math.round(Number(g.mastery)))),finding:String(g.finding||""),misconception:String(g.misconception||""),evidence:String(g.evidence||""),rework:String(g.rework||""),severity:["priority","developing","secure"].includes(g.severity)?g.severity:undefined})).sort((a:Gap,b:Gap)=>a.mastery-b.mastery);
       const detectedMaxMarks=Math.max(1,Math.round(Number(payload.maxMarks)||assessment.maxMarks));
       const score=Math.max(0,Math.min(detectedMaxMarks,Math.round(Number(payload.score))));
-      const result:GradeResult={fileId:file.id,studentName:studentName.trim(),questionPaperFileId:qpId||undefined,questionPaperName:qp?.name,score,maxMarks:detectedMaxMarks,gaps,date:new Date().toISOString(),feedback:typeof payload.feedback==="string"?payload.feedback:undefined,ocrText:typeof payload.ocrText==="string"?payload.ocrText:undefined};
+      const result:GradeResult={fileId:file.id,studentName:studentName.trim(),questionPaperFileId:qpId||undefined,questionPaperName:qp?.name,score,maxMarks:detectedMaxMarks,gaps,date:new Date().toISOString(),feedback:typeof payload.feedback==="string"?payload.feedback:undefined,ocrText:typeof payload.ocrText==="string"?payload.ocrText:undefined,evidenceFingerprint};
       update(assessment.id,{
         maxMarks:detectedMaxMarks,
         gradeResults:{...(assessment.gradeResults||{}),[file.id]:result},
@@ -768,7 +764,7 @@ function PerFileGradeDialog({assessment,file,state,setState,update,open,notify}:
     {!candidates.length&&<p className="form-error">Upload the question paper alongside this answer sheet for the most accurate grading.</p>}
     {progress>0&&<><Progress value={progress}/><p className="modal-copy">{running?`Grading with Mistral: ${progress}%`:"Grading complete"}</p></>}
     {gradeError&&<p className="form-error" role="alert">{gradeError}</p>}
-    <button className="primary full" disabled={running} onClick={grade}>{running?`Grading ${studentName||"answer sheet"}…`:alreadyGraded?"Regrade this answer sheet":"Grade this answer sheet"}</button>
+    <button className="primary full" disabled={running} onClick={grade}>{running?`Analysing ${studentName||"answer sheet"}…`:alreadyGraded?"Reanalyse unchanged evidence":"Analyse this answer sheet"}</button>
   </>
 }
 
@@ -784,8 +780,8 @@ function StudentGapsDialog({assessment,fileId,open}:any){
       <Metric label="Priority gap" value={priority.mastery+"%"} note={priority.concept}/>
       <Metric label="Concepts assessed" value={result.gaps.length} note={result.questionPaperName?`Against ${result.questionPaperName}`:"No question paper linked"}/>
     </div>
-    <div className="gap-funnel">{sorted.map(g=><span key={g.concept} className={g.mastery<55?"critical":""}><i style={{width:`${g.mastery}%`}}/>{g.concept} · {g.mastery}%</span>)}</div>
-    <p className="modal-copy">Priority learning gap: <b>{priority.concept}</b>. Generate a targeted study guide for this gap, then a practice worksheet with an answer key.</p>
+    <div className="diagnostic-gap-list">{sorted.map((g,index)=><article key={g.concept} className={g.mastery<55?"critical":""}><header><span>{index+1}</span><div><p>{g.severity||(g.mastery<55?"priority":"developing")} learning gap</p><h3>{g.concept}</h3></div><b>{g.mastery}% mastery</b></header><dl><div><dt>Diagnostic finding</dt><dd>{g.finding||`The response shows incomplete understanding of ${g.concept}.`}</dd></div><div><dt>Likely misunderstanding</dt><dd>{g.misconception||"The exact misconception was not captured in this earlier analysis. Reanalyse once to create the detailed diagnostic."}</dd></div><div><dt>Evidence from the answer</dt><dd>{g.evidence||result.feedback||"Review the OCR answer and teacher feedback for supporting evidence."}</dd></div><div><dt>What the child needs to rework</dt><dd>{g.rework||`Revisit the core idea, then practise explaining and applying ${g.concept}.`}</dd></div></dl></article>)}</div>
+    <p className="modal-copy">The study guide will cover all {sorted.length} identified topic{sorted.length===1?"":"s"}, ordered from the most urgent knowledge gap to the strongest area.</p>
     <div className="button-row">
       <button className="secondary" onClick={()=>open(`grade-file:${fileId}`)}>Regrade this sheet</button>
       <button className="primary" onClick={()=>open(`study-guide:${fileId}`)}>Generate study guide</button>
