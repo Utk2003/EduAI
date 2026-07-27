@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { createClient } from "@supabase/supabase-js";
 
 type Role = "Teacher" | "Principal" | "School admin" | "Platform admin";
 type TeacherModule = "Home" | "Work" | "Review" | "X-Ray" | "Interventions" | "Students" | "Resources" | "Achievements" | "Reports" | "Settings";
@@ -57,6 +58,12 @@ const demoAccounts:DemoProfile[]=[
 ];
 
 function cloneInitial(){return JSON.parse(JSON.stringify(initialState)) as DemoState}
+let activeAccessToken="";
+function authFetch(input:RequestInfo|URL,init:RequestInit={}){
+  const headers=new Headers(init.headers);
+  if(activeAccessToken)headers.set("Authorization",`Bearer ${activeAccessToken}`);
+  return fetch(input,{...init,headers});
+}
 function newTeacherState(profile:DemoProfile):DemoState{
   const state=cloneInitial();
   return {
@@ -64,9 +71,9 @@ function newTeacherState(profile:DemoProfile):DemoState{
     assessments:[],
     interventions:[],
     resources:[],
-    events:[`Teacher demo account created · ${profile.name}`],
+    events:[`Teacher workspace created · ${profile.name}`],
     users:[{id:profile.id,name:profile.name,email:profile.email,role:"Teacher",school:profile.school,phone:"",status:"Active"}],
-    schools:[`${profile.school} · Demo workspace`],
+    schools:[`${profile.school} · Teacher workspace`],
   };
 }
 function logApiTiming(setState:(fn:(s:DemoState)=>DemoState)=>void,timing?:{provider:"mistral"|"openai";ms:number;ok:boolean}[]){
@@ -122,7 +129,47 @@ function masteryTrend(state:DemoState):{label:string;value:number}[]{
 }
 
 export default function FunctionalEduAIApp(){
+  const [client,setClient]=useState<any>(null);
+  const [session,setSession]=useState<any>(null);
   const [profile,setProfile]=useState<DemoProfile|null>(null);
+  const [needsProfile,setNeedsProfile]=useState(false);
+  const [loading,setLoading]=useState(true);
+  const [authError,setAuthError]=useState("");
+
+  useEffect(()=>{let alive=true;let unsubscribe:(()=>void)|undefined;void(async()=>{
+    try{
+      const response=await fetch("/api/auth/config",{cache:"no-store"});
+      const config=await response.json();
+      if(!response.ok)throw new Error(config.error||"Authentication is unavailable.");
+      const supabase=createClient(config.url,config.publishableKey,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+      if(!alive)return;
+      setClient(supabase);
+      const apply=async(next:any)=>{
+        setSession(next);activeAccessToken=next?.access_token||"";
+        if(!next){setProfile(null);setNeedsProfile(false);setLoading(false);return}
+        setLoading(true);
+        const profileResponse=await authFetch("/api/profile",{cache:"no-store"});
+        const payload=await profileResponse.json();
+        if(!profileResponse.ok)throw new Error(payload.error||"Could not load your profile.");
+        if(payload.profile){
+          setProfile({id:payload.profile.id,name:payload.profile.name,email:payload.profile.email,role:"Teacher",school:payload.profile.school,label:"Teacher account"});
+          setNeedsProfile(false);
+        }else{setProfile(null);setNeedsProfile(true)}
+        setLoading(false);
+      };
+      const {data}=await supabase.auth.getSession();
+      await apply(data.session);
+      const {data:subscription}=supabase.auth.onAuthStateChange((_event:any,next:any)=>{void apply(next).catch(error=>{setAuthError(error.message);setLoading(false)})});
+      unsubscribe=()=>subscription.subscription.unsubscribe();
+    }catch(error){if(alive){setAuthError(error instanceof Error?error.message:"Authentication failed.");setLoading(false)}}
+  })();return()=>{alive=false;unsubscribe?.()}},[]);
+
+  if(loading)return <div className="app-loading"><img src="/brand/logo.png" alt="EduAI Hub"/><b>Preparing your secure workspace…</b></div>;
+  if(!session||needsProfile||!profile)return <TeacherAuth client={client} session={session} needsProfile={needsProfile} error={authError} onProfile={next=>{setProfile(next);setNeedsProfile(false)}}/>;
+  return <WorkspaceApp profile={profile} onSignOut={async()=>{await client.auth.signOut();activeAccessToken="";setSession(null);setProfile(null)}}/>;
+}
+
+function WorkspaceApp({profile,onSignOut}:{profile:DemoProfile;onSignOut:()=>Promise<void>}){
   const [role,setRole]=useState<Role>("Teacher");
   const [module,setModule]=useState<TeacherModule|AdminModule>("Home");
   const [state,setState]=useState<DemoState>(cloneInitial);
@@ -133,34 +180,16 @@ export default function FunctionalEduAIApp(){
   const [ready,setReady]=useState(false);
   const [syncStatus,setSyncStatus]=useState<"Loading"|"Syncing"|"Synced"|"Offline">("Loading");
 
-  useEffect(()=>{void(async()=>{let restored:any=null;try{const response=await fetch("/api/workspace",{cache:"no-store"});if(response.ok){const payload=await response.json();restored=payload.state;setSyncStatus("Synced")}}catch{}try{if(!restored){const cached=localStorage.getItem("eduai-xray-offline-cache-v1");if(cached)restored=JSON.parse(cached);setSyncStatus("Offline")}if(restored){const base=cloneInitial();setState({...base,...restored,students:restored.students||base.students,resources:(restored.resources||base.resources).map((r:Worksheet)=>({...r,answerSheets:r.answerSheets||0,gradedSheets:r.gradedSheets||0})),academicYears:restored.academicYears||base.academicYears,apiLog:restored.apiLog||[]})}setDark(localStorage.getItem("eduai-theme")==="dark")}catch{}setReady(true)})()},[]);
-  useEffect(()=>{if(!ready)return;localStorage.setItem("eduai-xray-offline-cache-v1",JSON.stringify(state));setSyncStatus("Syncing");const timer=window.setTimeout(()=>{void fetch("/api/workspace",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({state})}).then(response=>{if(!response.ok)throw new Error("sync failed");setSyncStatus("Synced")}).catch(()=>setSyncStatus("Offline"))},700);return()=>window.clearTimeout(timer)},[state,ready]);
+  useEffect(()=>{void(async()=>{let restored:any=null;try{const response=await authFetch("/api/workspace",{cache:"no-store"});if(response.ok){const payload=await response.json();restored=payload.state;setSyncStatus("Synced")}}catch{}try{if(!restored){const cached=localStorage.getItem(`eduai-xray-offline-cache-v1:${profile.id}`);if(cached)restored=JSON.parse(cached);setSyncStatus("Offline")}if(restored){const base=cloneInitial();setState({...base,...restored,students:restored.students||base.students,resources:(restored.resources||base.resources).map((r:Worksheet)=>({...r,answerSheets:r.answerSheets||0,gradedSheets:r.gradedSheets||0})),academicYears:restored.academicYears||base.academicYears,apiLog:restored.apiLog||[]})}else{setState(newTeacherState(profile));setSelectedId("")}setDark(localStorage.getItem("eduai-theme")==="dark")}catch{}setReady(true)})()},[profile.id]);
+  useEffect(()=>{if(!ready)return;localStorage.setItem(`eduai-xray-offline-cache-v1:${profile.id}`,JSON.stringify(state));setSyncStatus("Syncing");const timer=window.setTimeout(()=>{void authFetch("/api/workspace",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({state})}).then(response=>{if(!response.ok)throw new Error("sync failed");setSyncStatus("Synced")}).catch(()=>setSyncStatus("Offline"))},700);return()=>window.clearTimeout(timer)},[state,ready,profile.id]);
   useEffect(()=>{document.documentElement.dataset.theme=dark?"dark":"light";if(ready)localStorage.setItem("eduai-theme",dark?"dark":"light")},[dark,ready]);
   const selected=state.assessments.find(a=>a.id===selectedId)||state.assessments[0];
   const notify=(text:string,kind:"success"|"warning"|"error"="success")=>{setToast({text,kind});window.setTimeout(()=>setToast(null),3200)};
   const updateAssessment=(id:string,patch:Partial<Assessment>)=>setState(s=>({...s,assessments:s.assessments.map(a=>a.id===id?{...a,...patch}:a),events:[`${new Date().toLocaleTimeString()} · ${patch.stage?stageLabel[patch.stage]:"Assessment updated"}`,...s.events].slice(0,20)}));
   const openAssessment=(id:string,next:TeacherModule="Work")=>{setSelectedId(id);setModule(next)};
   const resetDemo=()=>{setState(cloneInitial());setSelectedId("a1");notify("Demo data restored")};
-  const signInDemo=(account:DemoProfile)=>{
-    setProfile(account);
-    setRole(account.role);
-    setState(cloneInitial());
-    setSelectedId("a1");
-    setModule(account.role==="Teacher"?"Home":"Overview");
-  };
-  const createTeacherAccount=(account:DemoProfile)=>{
-    setProfile(account);
-    setRole("Teacher");
-    setState(newTeacherState(account));
-    setSelectedId("");
-    setModule("Work");
-    setDialog("create-assessment");
-  };
-  const signOutDemo=()=>{setProfile(null);setDialog(null);setToast(null);setRole("Teacher");setModule("Home")};
-
   useEffect(()=>{setModule(role==="Teacher"?"Home":"Overview")},[role]);
   if(!ready)return <div className="app-loading"><img src="/brand/logo.png" alt="EduAI Hub"/><b>Preparing your workspace…</b></div>;
-  if(!profile)return <DemoAccess accounts={demoAccounts} signIn={signInDemo} createTeacher={createTeacherAccount}/>;
 
   const nav=role==="Teacher"?teacherNav:role==="School admin"?["Overview","Users","Schools & Classes","Students","Academic years","Branding & Privacy","Reports"] as AdminModule[]:role==="Platform admin"?["Overview","Schools","Users","Analytics","AI Configuration","Feature flags","System health","Audit"] as AdminModule[]:["Overview","Reports"] as AdminModule[];
   const initials=profile.name.split(/\s+/).map(x=>x[0]).join("").slice(0,2).toUpperCase();
@@ -180,7 +209,7 @@ export default function FunctionalEduAIApp(){
         <div className="top-actions">
           <span className={`sync-indicator ${syncStatus.toLowerCase()}`}>{syncStatus==="Synced"?"● Cloud synced":syncStatus==="Syncing"?"◌ Saving…":syncStatus==="Offline"?"○ Offline · queued":"◌ Loading…"}</span>
           <span className="demo-role-badge">{profile.label}</span>
-          <button className="demo-signout" onClick={signOutDemo}>Switch account</button>
+          <button className="demo-signout" onClick={()=>void onSignOut()}>Log out</button>
           <button aria-label="Toggle appearance" onClick={()=>setDark(x=>!x)}>{dark?"☀":"☾"}</button>
           <button aria-label="Notifications" onClick={()=>setDialog("notifications")}>♢{state.events.length>0&&<em>{Math.min(9,state.events.length)}</em>}</button>
         </div>
@@ -200,6 +229,43 @@ export default function FunctionalEduAIApp(){
     {toast&&<div className={`toast ${toast.kind}`} role="status"><b>{toast.kind==="error"?"!":"✓"}</b>{toast.text}</div>}
     {dialog&&<AppDialog type={dialog} close={()=>setDialog(null)} open={setDialog} state={state} setState={setState} selected={selected} update={updateAssessment} notify={notify} resetDemo={resetDemo} openAssessment={openAssessment}/>}
   </div>
+}
+
+function TeacherAuth({client,session,needsProfile,error,onProfile}:{client:any;session:any;needsProfile:boolean;error:string;onProfile:(profile:DemoProfile)=>void}){
+  const [mode,setMode]=useState<"login"|"signup">("login");
+  const [busy,setBusy]=useState(false);
+  const [message,setMessage]=useState(error);
+  const submitAuth=async(event:FormEvent<HTMLFormElement>)=>{
+    event.preventDefault();if(!client)return;
+    const data=new FormData(event.currentTarget);
+    const email=String(data.get("email")||"").trim().toLowerCase();
+    const password=String(data.get("password")||"");
+    setBusy(true);setMessage("");
+    const result=mode==="signup"
+      ? await client.auth.signUp({email,password,options:{emailRedirectTo:`${location.origin}/app`}})
+      : await client.auth.signInWithPassword({email,password});
+    setBusy(false);
+    if(result.error)setMessage(result.error.message);
+    else if(mode==="signup"&&!result.data.session)setMessage("Check your email to confirm your account, then return here to log in.");
+  };
+  const oauth=async(provider:"google"|"azure")=>{
+    if(!client)return;setMessage("");
+    const {error:oauthError}=await client.auth.signInWithOAuth({provider,options:{redirectTo:`${location.origin}/app`,...(provider==="azure"?{scopes:"email"}:{})}});
+    if(oauthError)setMessage(oauthError.message);
+  };
+  const saveProfile=async(event:FormEvent<HTMLFormElement>)=>{
+    event.preventDefault();const data=new FormData(event.currentTarget);setBusy(true);setMessage("");
+    const response=await authFetch("/api/profile",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(Object.fromEntries(data))});
+    const payload=await response.json();setBusy(false);
+    if(!response.ok){setMessage(payload.error||"Could not save your profile.");return}
+    onProfile({id:payload.profile.id,name:payload.profile.name,email:payload.profile.email,role:"Teacher",school:payload.profile.school,label:"Teacher account"});
+  };
+  return <main className="demo-auth">
+    <section className="demo-auth-story"><img src="/brand/logo.png" alt="EduAI Hub"/><p className="eyebrow">EduAI Learning X-Ray</p><h1>Your work, securely saved to your teacher account.</h1><p>Grade uploaded answer sheets, identify evidence-based learning gaps, and return later to continue exactly where you stopped.</p><ol><li><b>1</b><span>Sign in securely</span></li><li><b>2</b><span>Create or resume assessments</span></li><li><b>3</b><span>Review AI evidence before publishing</span></li></ol></section>
+    <section className="demo-auth-panel"><div className="demo-auth-card">
+      {session&&needsProfile?<><p className="eyebrow">First login</p><h2>Complete your teacher profile</h2><p>We’ll use these details to create your private workspace.</p><form onSubmit={saveProfile}><label>Your name<input name="name" required autoFocus/></label><label>School name<input name="school" required/></label><label>Phone (optional)<input name="phone"/></label><label>Subjects taught<input name="subjects" placeholder="e.g. Economics, Business Studies"/></label><label>Grades / classes<input name="grades" placeholder="e.g. Grade 11 and 12"/></label>{message&&<p className="form-error" role="alert">{message}</p>}<button className="primary full" disabled={busy}>{busy?"Creating workspace…":"Save profile & continue"}</button></form></>:<><p className="eyebrow">Teacher account</p><h2>{mode==="login"?"Welcome back":"Create your account"}</h2><form onSubmit={submitAuth}><label>Email address<input name="email" type="email" autoComplete="email" required/></label><label>Password<input name="password" type="password" minLength={8} autoComplete={mode==="login"?"current-password":"new-password"} required/></label>{message&&<p className="form-error" role="alert">{message}</p>}<button className="primary full" disabled={busy}>{busy?"Please wait…":mode==="login"?"Log in":"Create account"}</button></form><div className="demo-divider"><span>or continue with</span></div><div className="button-row"><button className="secondary" onClick={()=>void oauth("google")}>Google</button><button className="secondary" onClick={()=>void oauth("azure")}>Microsoft</button></div><button className="secondary full" onClick={()=>{setMode(mode==="login"?"signup":"login");setMessage("")}}>{mode==="login"?"New teacher? Create an account":"Already have an account? Log in"}</button></>}
+    </div></section>
+  </main>;
 }
 
 function DemoAccess({accounts,signIn,createTeacher}:{accounts:DemoProfile[];signIn:(account:DemoProfile)=>void;createTeacher:(account:DemoProfile)=>void}){
@@ -574,7 +640,7 @@ function StudyGuideDialog({assessment,fileId,open,done}:any){
   const generate=async()=>{
     setGenerating(true);setError("");
     try{
-      const response=await fetch("/api/generate-study-guide",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subject:assessment.subject,concept,studentName:result?.studentName,mastery:gap.mastery,feedback:result?.feedback,ocrText:result?.ocrText})});
+      const response=await authFetch("/api/generate-study-guide",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({subject:assessment.subject,concept,studentName:result?.studentName,mastery:gap.mastery,feedback:result?.feedback,ocrText:result?.ocrText})});
       const payload=await response.json();
       if(!response.ok)throw new Error(payload?.error||"Study-guide generation failed");
       setGuide(payload.guide);
@@ -610,7 +676,9 @@ function PerFileGradeDialog({assessment,file,state,setState,update,open,notify}:
   if(!file)return <><DialogHead eyebrow={assessment.title} title="Grade answer sheet"/><p className="modal-copy">This answer sheet could not be found. Close this dialog and try again.</p></>;
   const candidates:UploadFile[]=(assessment.files||[]).filter((f:UploadFile)=>f.id!==file.id);
   const preferredQP=candidates.find(f=>/question|paper|qp/i.test(f.name))||candidates[0];
+  const preferredKey=candidates.find(f=>/answer.?key|marking.?scheme|solutions?/i.test(f.name));
   const [qpId,setQpId]=useState(preferredQP?.id||"");
+  const [answerKeyId,setAnswerKeyId]=useState(preferredKey?.id||"");
   const [studentName,setStudentName]=useState(()=>guessStudentName(file,state.students));
   const [progress,setProgress]=useState(0);
   const [running,setRunning]=useState(false);
@@ -624,8 +692,12 @@ function PerFileGradeDialog({assessment,file,state,setState,update,open,notify}:
       const blob=await readFileBlob(file.id);
       if(!blob)throw new Error("This file's data could not be found in local storage. Try re-uploading it.");
       const fileBase64=await blobToBase64(blob);
+      const qp=candidates.find(f=>f.id===qpId);
+      const qpBlob=qpId?await readFileBlob(qpId):null;
+      const answerKeyFile=candidates.find(f=>f.id===answerKeyId);
+      const answerKeyBlob=answerKeyId?await readFileBlob(answerKeyId):null;
       const concepts=gapConceptsFor(assessment.subject);
-      const res=await fetch("/api/grade",{
+      const res=await authFetch("/api/grade",{
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
@@ -637,7 +709,13 @@ function PerFileGradeDialog({assessment,file,state,setState,update,open,notify}:
           rubric:assessment.rubric,
           concepts,
           fileBase64,
-          mimeType:file.type||"application/pdf"
+          mimeType:file.type||"application/pdf",
+          questionPaperBase64:qpBlob?await blobToBase64(qpBlob):undefined,
+          questionPaperMimeType:qp?.type||"application/pdf",
+          questionPaperName:qp?.name,
+          answerKeyBase64:answerKeyBlob?await blobToBase64(answerKeyBlob):undefined,
+          answerKeyMimeType:answerKeyFile?.type||"application/pdf",
+          answerKeyName:answerKeyFile?.name
         })
       });
       const payload=await res.json();
@@ -645,10 +723,11 @@ function PerFileGradeDialog({assessment,file,state,setState,update,open,notify}:
       if(!res.ok)throw new Error(payload?.error||"Grading request failed");
       clearInterval(timer);setProgress(100);
       const gaps:Gap[]=(payload.gaps||[]).map((g:any)=>({concept:String(g.concept),mastery:Math.max(0,Math.min(100,Math.round(Number(g.mastery))))})).sort((a:Gap,b:Gap)=>a.mastery-b.mastery);
-      const score=Math.max(0,Math.min(assessment.maxMarks,Math.round(Number(payload.score))));
-      const qp=candidates.find(f=>f.id===qpId);
-      const result:GradeResult={fileId:file.id,studentName:studentName.trim(),questionPaperFileId:qpId||undefined,questionPaperName:qp?.name,score,maxMarks:assessment.maxMarks,gaps,date:new Date().toISOString(),feedback:typeof payload.feedback==="string"?payload.feedback:undefined,ocrText:typeof payload.ocrText==="string"?payload.ocrText:undefined};
+      const detectedMaxMarks=Math.max(1,Math.round(Number(payload.maxMarks)||assessment.maxMarks));
+      const score=Math.max(0,Math.min(detectedMaxMarks,Math.round(Number(payload.score))));
+      const result:GradeResult={fileId:file.id,studentName:studentName.trim(),questionPaperFileId:qpId||undefined,questionPaperName:qp?.name,score,maxMarks:detectedMaxMarks,gaps,date:new Date().toISOString(),feedback:typeof payload.feedback==="string"?payload.feedback:undefined,ocrText:typeof payload.ocrText==="string"?payload.ocrText:undefined};
       update(assessment.id,{
+        maxMarks:detectedMaxMarks,
         gradeResults:{...(assessment.gradeResults||{}),[file.id]:result},
         gradedFileIds:Array.from(new Set([...(assessment.gradedFileIds||[]),file.id])),
         lastGradedFileId:file.id,
@@ -673,6 +752,12 @@ function PerFileGradeDialog({assessment,file,state,setState,update,open,notify}:
       <select value={qpId} onChange={e=>setQpId(e.target.value)}>
         <option value="">No question paper uploaded · use subject rubric only</option>
         {candidates.map(f=><option key={f.id} value={f.id}>{f.name}{/question|paper|qp/i.test(f.name)?" (likely question paper)":""}</option>)}
+      </select>
+    </Field>
+    <Field label="Answer key / marking scheme (recommended)">
+      <select value={answerKeyId} onChange={e=>setAnswerKeyId(e.target.value)}>
+        <option value="">Use typed answer key or rubric only</option>
+        {candidates.filter(f=>f.id!==qpId).map(f=><option key={f.id} value={f.id}>{f.name}{/answer.?key|marking.?scheme|solutions?/i.test(f.name)?" (likely answer key)":""}</option>)}
       </select>
     </Field>
     {!candidates.length&&<p className="form-error">Upload the question paper alongside this answer sheet for the most accurate grading.</p>}
@@ -707,7 +792,7 @@ function WorksheetDialog({setState,worksheet,presetConcept,presetTitle,presetStu
   const generate=async()=>{
     setGenError("");setGenerating(true);
     try{
-      const res=await fetch("/api/generate-worksheet",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({concept,subject:worksheet?.subject,difficulty,template,mcqCount:mcq,subjectiveCount:subjective})});
+      const res=await authFetch("/api/generate-worksheet",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({concept,subject:worksheet?.subject,difficulty,template,mcqCount:mcq,subjectiveCount:subjective})});
       const payload=await res.json();
       logApiTiming(setState,payload?.timing);
       if(!res.ok)throw new Error(payload?.error||"Worksheet generation failed");
@@ -738,7 +823,7 @@ function WorksheetGradingDialog({worksheet,setState,done}:any){
     try{
       const graded_results=await Promise.all(files.map(async file=>{
         const fileBase64=await blobToBase64(file);
-        const res=await fetch("/api/grade",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
+        const res=await authFetch("/api/grade",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
           subject:worksheet?.concept||"General",
           studentName:guessNameFromFile(file.name),
           fileName:file.name,
@@ -983,9 +1068,9 @@ function openFileDb():Promise<IDBDatabase>{return new Promise((resolve,reject)=>
 async function saveLocalFileBlob(id:string,file:Blob){const db=await openFileDb();await new Promise<void>((resolve,reject)=>{const tx=db.transaction("files","readwrite");tx.objectStore("files").put(file,id);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error)});db.close()}
 async function readLocalFileBlob(id:string):Promise<Blob|null>{const db=await openFileDb();const value=await new Promise<any>((resolve,reject)=>{const request=db.transaction("files").objectStore("files").get(id);request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error)});db.close();return value||null}
 async function removeLocalFileBlob(id:string){const db=await openFileDb();await new Promise<void>((resolve,reject)=>{const tx=db.transaction("files","readwrite");tx.objectStore("files").delete(id);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error)});db.close()}
-async function saveFileBlob(id:string,file:Blob){await saveLocalFileBlob(id,file);const response=await fetch(`/api/files/${encodeURIComponent(id)}`,{method:"PUT",headers:{"Content-Type":file.type||"application/octet-stream"},body:file});if(!response.ok)throw new Error("Cloud file upload failed")}
-async function readFileBlob(id:string):Promise<Blob|null>{const cached=await readLocalFileBlob(id);if(cached)return cached;try{const response=await fetch(`/api/files/${encodeURIComponent(id)}`);if(!response.ok)return null;const blob=await response.blob();await saveLocalFileBlob(id,blob);return blob}catch{return null}}
-async function removeFileBlob(id:string){await removeLocalFileBlob(id);await fetch(`/api/files/${encodeURIComponent(id)}`,{method:"DELETE"})}
+async function saveFileBlob(id:string,file:Blob){await saveLocalFileBlob(id,file);const response=await authFetch(`/api/files/${encodeURIComponent(id)}`,{method:"PUT",headers:{"Content-Type":file.type||"application/octet-stream"},body:file});if(!response.ok)throw new Error("Cloud file upload failed")}
+async function readFileBlob(id:string):Promise<Blob|null>{const cached=await readLocalFileBlob(id);if(cached)return cached;try{const response=await authFetch(`/api/files/${encodeURIComponent(id)}`);if(!response.ok)return null;const blob=await response.blob();await saveLocalFileBlob(id,blob);return blob}catch{return null}}
+async function removeFileBlob(id:string){await removeLocalFileBlob(id);await authFetch(`/api/files/${encodeURIComponent(id)}`,{method:"DELETE"})}
 function blobToBase64(blob:Blob):Promise<string>{return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onloadend=()=>{const result=reader.result as string;resolve(result.split(",")[1]||"")};reader.onerror=()=>reject(reader.error);reader.readAsDataURL(blob)})}
 
 function UploadDialogV2({assessment,update,done}:any){

@@ -1,14 +1,16 @@
 import { getSupabaseServer } from "../../../lib/supabase-server";
+import { getAuthenticatedUser, unauthorized } from "../../../lib/supabase-auth";
 
-const WORKSPACE_ID = "sunrise-academy";
 const MAX_STATE_BYTES = 4 * 1024 * 1024;
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const user = await getAuthenticatedUser(request);
+    if (!user) return unauthorized();
     const { data, error } = await getSupabaseServer()
       .from("workspace_snapshots")
       .select("state_json, revision, updated_at")
-      .eq("workspace_id", WORKSPACE_ID)
+      .eq("workspace_id", `teacher:${user.id}`)
       .maybeSingle();
     if (error) throw error;
     if (!data) return Response.json({ state: null, revision: 0 });
@@ -20,6 +22,8 @@ export async function GET() {
 
 export async function PUT(request: Request) {
   try {
+    const user = await getAuthenticatedUser(request);
+    if (!user) return unauthorized();
     const body = await request.json() as { state?: unknown };
     if (!body.state || typeof body.state !== "object") {
       return Response.json({ error: "A workspace state object is required." }, { status: 400 });
@@ -29,7 +33,7 @@ export async function PUT(request: Request) {
       return Response.json({ error: "Workspace state exceeds the 4 MB storage limit." }, { status: 413 });
     }
     const { data, error } = await getSupabaseServer().rpc("save_workspace_snapshot", {
-      p_workspace_id: WORKSPACE_ID,
+      p_workspace_id: `teacher:${user.id}`,
       p_state_json: body.state,
     });
     if (error) throw error;

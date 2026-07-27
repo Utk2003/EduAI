@@ -1,4 +1,5 @@
 import { getSupabaseServer, SUPABASE_FILES_BUCKET } from "../../../../lib/supabase-server";
+import { getAuthenticatedUser, unauthorized } from "../../../../lib/supabase-auth";
 
 function fileId(request: Request) {
   return decodeURIComponent(new URL(request.url).pathname.split("/").pop() || "");
@@ -6,6 +7,8 @@ function fileId(request: Request) {
 
 export async function PUT(request: Request) {
   try {
+    const user = await getAuthenticatedUser(request);
+    if (!user) return unauthorized();
     const id = fileId(request);
     if (!id || id.length > 300) return Response.json({ error: "Invalid file id." }, { status: 400 });
     const blob = await request.blob();
@@ -14,7 +17,7 @@ export async function PUT(request: Request) {
     }
     const { error } = await getSupabaseServer().storage
       .from(SUPABASE_FILES_BUCKET)
-      .upload(`uploads/${id}`, await blob.arrayBuffer(), {
+      .upload(`${user.id}/uploads/${id}`, await blob.arrayBuffer(), {
         contentType: request.headers.get("content-type") || "application/octet-stream",
         upsert: true,
       });
@@ -27,9 +30,11 @@ export async function PUT(request: Request) {
 
 export async function GET(request: Request) {
   try {
+    const user = await getAuthenticatedUser(request);
+    if (!user) return unauthorized();
     const { data, error } = await getSupabaseServer().storage
       .from(SUPABASE_FILES_BUCKET)
-      .download(`uploads/${fileId(request)}`);
+      .download(`${user.id}/uploads/${fileId(request)}`);
     if (error) return Response.json({ error: "File not found." }, { status: 404 });
     return new Response(data, {
       headers: {
@@ -44,9 +49,11 @@ export async function GET(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    const user = await getAuthenticatedUser(request);
+    if (!user) return unauthorized();
     const { error } = await getSupabaseServer().storage
       .from(SUPABASE_FILES_BUCKET)
-      .remove([`uploads/${fileId(request)}`]);
+      .remove([`${user.id}/uploads/${fileId(request)}`]);
     if (error) throw error;
     return Response.json({ ok: true });
   } catch (error) {

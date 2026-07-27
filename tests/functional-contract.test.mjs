@@ -6,10 +6,10 @@ const app = readFileSync(new URL("../app/ui/FunctionalEduAIApp.tsx", import.meta
 const login = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
 
 test("persists workspace records in cloud storage with an offline cache", () => {
-  assert.match(app, /fetch\("\/api\/workspace"/);
+  assert.match(app, /authFetch\("\/api\/workspace"/);
   assert.match(app, /method:"PUT"/);
-  assert.match(app, /localStorage\.getItem\("eduai-xray-offline-cache-v1"\)/);
-  assert.match(app, /localStorage\.setItem\("eduai-xray-offline-cache-v1"/);
+  assert.match(app, /localStorage\.getItem\(`eduai-xray-offline-cache-v1:\$\{profile\.id\}`\)/);
+  assert.match(app, /localStorage\.setItem\(`eduai-xray-offline-cache-v1:\$\{profile\.id\}`/);
   for (const collection of ["students", "resources", "academicYears"]) assert.match(app, new RegExp(`restored\\.${collection}\\|\\|base\\.${collection}`));
 });
 
@@ -30,7 +30,7 @@ test("uploaded files remain discoverable with cloud bytes and an offline cache",
   assert.match(app, /indexedDB\.open\("eduai-learning-xray-files"/);
   assert.match(app, /saveFileBlob\(id,file\)/);
   assert.match(app, /readFileBlob\(file\.id\)/);
-  assert.match(app, /fetch\(`\/api\/files\/\$\{encodeURIComponent\(id\)\}`/);
+  assert.match(app, /authFetch\(`\/api\/files\/\$\{encodeURIComponent\(id\)\}`/);
 });
 
 test("teacher modules have persisted, actionable views", () => {
@@ -50,7 +50,7 @@ test("public controls navigate and legal routes exist", () => {
   assert.doesNotMatch(login, /href="#"/);
   assert.match(login, /Continue with Google/);
   assert.match(login, /Continue with Microsoft/);
-  assert.match(login, /Use email access code/);
+  assert.match(login, /Use email and password/);
   assert.ok(existsSync(new URL("../app/privacy/page.tsx", import.meta.url)));
   assert.ok(existsSync(new URL("../app/terms/page.tsx", import.meta.url)));
 });
@@ -84,16 +84,22 @@ test("teacher explicitly chooses grading or learning-gap analysis", () => {
   assert.match(app, /type="radio"/);
 });
 
-test("demo access starts logged out and covers every role", () => {
-  for (const role of ["Teacher demo", "Principal demo", "School admin demo", "Super admin demo"]) {
-    assert.ok(app.includes(role), `missing demo login: ${role}`);
+test("teacher authentication and first-login onboarding are complete", () => {
+  for (const capability of ["signInWithPassword", "signUp", "signInWithOAuth", '"google"', '"azure"', "Complete your teacher profile", "School name", "Log out"]) {
+    assert.ok(app.includes(capability), `missing teacher authentication behavior: ${capability}`);
   }
-  for (const capability of ["Choose a demo login", "Create a new teacher account", "Create account & add new work", "Switch account"]) {
-    assert.ok(app.includes(capability), `missing demo access behavior: ${capability}`);
-  }
-  assert.match(app, /if\(!profile\)return <DemoAccess/);
-  assert.match(app, /setDialog\("create-assessment"\)/);
+  assert.match(app, /auth\.signOut/);
+  assert.match(app, /authFetch\("\/api\/profile"/);
   assert.match(app, /assessments:\[\]/);
+});
+
+test("grading derives totals from the assessment and prioritizes an answer key", () => {
+  const grade = readFileSync(new URL("../app/api/grade/route.ts", import.meta.url), "utf8");
+  assert.match(grade, /Determine maxMarks dynamically/);
+  assert.match(grade, /PRIMARY REFERENCE/);
+  assert.match(app, /questionPaperBase64/);
+  assert.match(app, /answerKeyBase64/);
+  assert.match(app, /detectedMaxMarks/);
 });
 
 test("Mistral OCR evidence drives OpenAI learning resources", () => {
@@ -105,5 +111,5 @@ test("Mistral OCR evidence drives OpenAI learning resources", () => {
   assert.match(worksheet, /Subject: \$\{subject\}/);
   assert.match(studyGuide, /Answer-sheet OCR evidence/);
   assert.match(studyGuide, /Do not introduce mathematics examples/);
-  assert.match(app, /fetch\("\/api\/generate-study-guide"/);
+  assert.match(app, /authFetch\("\/api\/generate-study-guide"/);
 });

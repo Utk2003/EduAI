@@ -19,6 +19,8 @@ type StudyGuide = {
 
 export async function POST(request: Request) {
   try {
+    const user = await getAuthenticatedUser(request);
+    if (!user) return unauthorized();
     const body = (await request.json()) as StudyGuideRequest;
     const subject = body.subject?.trim() || "General";
     const concept = body.concept?.trim() || "the identified learning gap";
@@ -74,3 +76,4 @@ export async function POST(request: Request) {
     return Response.json({ error: error instanceof Error ? error.message : "Unexpected error" }, { status: 500 });
   }
 }
+import { getAuthenticatedUser, unauthorized } from "../../../lib/supabase-auth";

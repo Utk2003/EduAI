@@ -18,6 +18,8 @@ type WorksheetResult = {
 // consistent with grading analysis. Mistral is reserved for OCR elsewhere in this app.
 export async function POST(request: Request) {
   try {
+    const user = await getAuthenticatedUser(request);
+    if (!user) return unauthorized();
     const body = (await request.json()) as WorksheetRequestBody;
     const {
       concept = "the target concept",
@@ -103,3 +105,4 @@ export async function POST(request: Request) {
     return Response.json({ error: message }, { status: 500 });
   }
 }
+import { getAuthenticatedUser, unauthorized } from "../../../lib/supabase-auth";

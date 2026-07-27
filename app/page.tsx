@@ -1,5 +1,3 @@
-import { chatGPTSignInPath } from "./chatgpt-auth";
-
 export default function Home() {
   return (
       <main className="login-page">
@@ -22,12 +20,12 @@ export default function Home() {
             <p className="eyebrow">Welcome back</p>
             <h2>Sign in to Learning X-Ray</h2>
             <p>Use your verified account to securely access your school workspace.</p>
-            <a data-testid="sign-in" className="signin-primary" href={chatGPTSignInPath("/app")}><span>✦</span> Sign in securely</a>
+            <a data-testid="sign-in" className="signin-primary" href="/app"><span>✦</span> Sign in securely</a>
             <div className="login-divider"><span>School identity providers</span></div>
             <div className="provider-grid" aria-label="Supported school sign-in providers">
-              <a href={chatGPTSignInPath("/app")}><b>G</b><span>Continue with Google</span></a>
-              <a href={chatGPTSignInPath("/app")}><b>⊞</b><span>Continue with Microsoft</span></a>
-              <a href={chatGPTSignInPath("/app")}><b>@</b><span>Use email access code</span></a>
+              <a href="/app"><b>G</b><span>Continue with Google</span></a>
+              <a href="/app"><b>⊞</b><span>Continue with Microsoft</span></a>
+              <a href="/app"><b>@</b><span>Use email and password</span></a>
             </div>
             <p className="login-note"><span>●</span> Secure sign-in · Session protection · Audit history</p>
             <footer><a href="/privacy">Privacy</a><a href="/terms">Terms</a><span>© 2026 EduAI Hub</span></footer>

@@ -8,6 +8,12 @@ type GradeRequestBody = {
   concepts?: string[];
   fileBase64?: string; // raw base64, no data: prefix
   mimeType?: string;
+  questionPaperBase64?: string;
+  questionPaperMimeType?: string;
+  questionPaperName?: string;
+  answerKeyBase64?: string;
+  answerKeyMimeType?: string;
+  answerKeyName?: string;
 };
 
 // Step 1: OCR the uploaded answer sheet using Mistral's OCR API.
@@ -61,6 +67,8 @@ async function runOpenAIAnalysis(
     answerKey: string;
     rubric: string;
     concepts: string[];
+    questionPaperText: string;
+    answerKeyFileText: string;
   },
   apiKey: string
 ): Promise<{ score: number; maxMarks: number; gaps: { concept: string; mastery: number }[]; feedback: string; _ms: number }> {
@@ -72,6 +80,8 @@ async function runOpenAIAnalysis(
     "You are a teaching assistant that grades a student's answer sheet from OCR-extracted text against a rubric and answer key. " +
     "Respond with ONLY a single JSON object, no markdown fences, no commentary, matching exactly this shape: " +
     '{"score": number, "maxMarks": number, "gaps": [{"concept": string, "mastery": number}], "feedback": string}. ' +
+    "Determine maxMarks dynamically from the supplied question paper or assessment worksheet: prefer an explicit total, otherwise sum the marks assigned to individual questions. Only fall back to the declared maximum when the paper contains no usable mark evidence. " +
+    "When an answer key is supplied, treat it as the primary grading reference for correctness and expected evidence, while still applying the rubric and reasonable partial credit. " +
     "mastery is 0-100, based on how well the student's actual answer (from the OCR text) demonstrates each concept. " +
     "Include one gap entry per listed concept, in the same order. Base your grading on the OCR text provided, not assumptions.";
 
@@ -79,12 +89,14 @@ async function runOpenAIAnalysis(
     `Subject: ${ctx.subject}\n` +
     `Student: ${ctx.studentName}\n` +
     `Answer sheet file: ${ctx.fileName}\n` +
-    `Maximum marks: ${ctx.maxMarks}\n` +
-    `Answer key: ${ctx.answerKey || "(none provided)"}\n` +
+    `Declared maximum marks (fallback only): ${ctx.maxMarks}\n` +
+    `Typed answer key: ${ctx.answerKey || "(none provided)"}\n` +
     `Rubric: ${ctx.rubric || "(none provided)"}\n` +
     `Concepts to assess: ${conceptList}\n\n` +
-    `OCR-extracted answer sheet text:\n"""\n${ocrText}\n"""\n\n` +
-    "Grade this against the answer key and rubric, and produce the required JSON shape.";
+    `OCR-extracted question paper / assessment worksheet:\n"""\n${ctx.questionPaperText || "(not provided)"}\n"""\n\n` +
+    `OCR-extracted answer key file (PRIMARY REFERENCE when present):\n"""\n${ctx.answerKeyFileText || "(not provided)"}\n"""\n\n` +
+    `OCR-extracted student answer sheet:\n"""\n${ocrText}\n"""\n\n` +
+    "First determine the paper's total marks, then grade the student's answers against the answer key and rubric. Produce the required JSON shape.";
 
   const startedAt = Date.now();
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -124,6 +136,8 @@ async function runOpenAIAnalysis(
 
 export async function POST(request: Request) {
   try {
+    const user = await getAuthenticatedUser(request);
+    if (!user) return unauthorized();
     const body = (await request.json()) as GradeRequestBody;
     const {
       subject = "General",
@@ -135,6 +149,12 @@ export async function POST(request: Request) {
       concepts = [],
       fileBase64,
       mimeType = "application/pdf",
+      questionPaperBase64,
+      questionPaperMimeType = "application/pdf",
+      questionPaperName = "",
+      answerKeyBase64,
+      answerKeyMimeType = "application/pdf",
+      answerKeyName = "",
     } = body;
 
     const mistralKey = process.env.MISTRAL_API_KEY;
@@ -160,25 +180,43 @@ export async function POST(request: Request) {
 
     // Step 1 — OCR with Mistral (text extraction only)
     const ocr = await runMistralOCR(fileBase64, mimeType, mistralKey);
+    const questionPaperOcr = questionPaperBase64
+      ? await runMistralOCR(questionPaperBase64, questionPaperMimeType, mistralKey)
+      : { text: "", ms: 0 };
+    const answerKeyOcr = answerKeyBase64
+      ? await runMistralOCR(answerKeyBase64, answerKeyMimeType, mistralKey)
+      : { text: "", ms: 0 };
 
     // Step 2 — Analysis/grading with OpenAI
     const result = await runOpenAIAnalysis(
       ocr.text,
-      { subject, studentName, fileName, maxMarks, answerKey, rubric, concepts },
+      { subject, studentName, fileName, maxMarks, answerKey, rubric, concepts, questionPaperText: questionPaperOcr.text, answerKeyFileText: answerKeyOcr.text },
       openaiKey
     );
 
     const { _ms: openaiMs, ...gradePayload } = result;
+    const detectedMaxMarks = Number(gradePayload.maxMarks);
+    if (!Number.isFinite(detectedMaxMarks) || detectedMaxMarks <= 0 || detectedMaxMarks > 10000) {
+      throw new Error("The assessment total marks could not be determined reliably.");
+    }
+    gradePayload.maxMarks = detectedMaxMarks;
+    gradePayload.score = Math.max(0, Math.min(detectedMaxMarks, Number(gradePayload.score) || 0));
     return Response.json({
       ...gradePayload,
       ocrText: ocr.text,
       timing: [
-        { provider: "mistral", ms: ocr.ms, ok: true },
+        { provider: "mistral", ms: ocr.ms + questionPaperOcr.ms + answerKeyOcr.ms, ok: true },
         { provider: "openai", ms: openaiMs, ok: true },
       ],
+      gradingEvidence: {
+        questionPaper: questionPaperName || null,
+        answerKey: answerKeyName || (answerKey ? "Typed answer key" : null),
+        totalMarksSource: questionPaperOcr.text ? "question-paper" : "declared-fallback",
+      },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unexpected error";
     return Response.json({ error: message }, { status: 500 });
   }
 }
+import { getAuthenticatedUser, unauthorized } from "../../../lib/supabase-auth";
